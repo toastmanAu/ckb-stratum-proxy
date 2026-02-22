@@ -1,77 +1,84 @@
 # CKB Stratum Proxy
 
-A local Stratum proxy for **CKB (Eaglesong)** mining. Point any number of miners (ASICs, NerdMiners, etc.) at your Pi's IP address, and this proxy handles a single upstream pool connection, distributing work and forwarding shares.
+A solo mining stratum proxy for [Nervos CKB](https://www.nervos.org/) (Eaglesong PoW).
 
-## Why?
+Connects directly to your local CKB full node — no pool involved. Any block found goes straight to the network and rewards go to your address.
 
-- **Single upstream connection** — all your miners share one pool connection
-- **Local network mining** — miners connect to your Pi, not direct to pool
-- **Stats dashboard** — see all connected miners and share counts in one place
-- **Works with ViaBTC** — handles the 5-param `mining.notify` and `mining.set_target` CKB protocol quirks
+## Features
 
-## Setup
+- **Solo mining** — direct to your CKB node via `get_block_template` / `submit_block`
+- **Multi-miner** — supports any stratum-compatible CKB miner (Goldshell CKBox, NerdMiner, etc.)
+- **Vardiff** — automatic difficulty adjustment per miner
+- **Goldshell compatible** — handles `mining.set_difficulty`, session resume, `mining.suggest_difficulty`
+- **NerdMiner compatible** — handles `mining.set_target`, `mining.suggest_target`
+- **Live stats** — HTTP stats API on port 8081 with hashrate estimation
+- **Stable** — systemd service, RPC timeouts, node health tracking, auto-restart
+
+## Quick Start
 
 ```bash
+git clone https://github.com/toastmanAu/ckb-stratum-proxy
+cd ckb-stratum-proxy
+npm install
 cp config.example.json config.json
-# Edit config.json with your pool details
-nano config.json
+# Edit config.json with your node details and CKB address
+bash install.sh
 ```
 
 ## Config
 
 ```json
 {
-  "pool": {
-    "host": "mining.viabtc.io",
-    "port": 3001,
-    "user": "ckb1qyqYOURADDRESS.WorkerName",
-    "pass": "x"
+  "node": {
+    "host": "127.0.0.1",
+    "port": 8114,
+    "coinbase": "ckb1qyq..."
   },
   "local": {
     "host": "0.0.0.0",
     "port": 3333,
-    "statsPort": 8081,
-    "difficulty": null
+    "statsPort": 8081
+  },
+  "mode": "solo",
+  "vardiff": {
+    "targetShareSec": 30,
+    "initialDiff": 7000
   }
 }
 ```
 
-- `difficulty`: Set a local difficulty override (e.g. `1` for NerdMiners). `null` = inherit pool difficulty.
+## Stats API
 
-## Run
-
-```bash
-# Foreground (dev/test)
-node proxy.js
-
-# Background (production)
-bash start.sh
+```
+GET http://localhost:8081/        — full stats JSON
+GET http://localhost:8081/health  — health check
 ```
 
-## Point your miner at it
+Returns hashrate, connected miners, accepted shares, blocks found.
 
-| Setting  | Value                        |
-|----------|------------------------------|
-| Host     | `<your-pi-ip>` (e.g. 192.168.68.87) |
-| Port     | `3333`                       |
-| User     | anything (proxied under your pool account) |
-| Pass     | anything                     |
+## Miner Setup
 
-## Stats
+Point your miner at:
+```
+stratum+tcp://<your-pi-ip>:3333
+```
 
-Visit `http://<pi-ip>:8081/` for live JSON stats:
-- Upstream connection status
-- Current job / block height
-- Share accept rate
-- Per-miner breakdown
+Username: your CKB address  
+Password: `x`
 
-## How it works
+## Requirements
 
-The proxy allocates each miner a unique extranonce prefix (1 byte appended to the pool's `extranonce1`). This means each miner searches a non-overlapping nonce space — no duplicate work. When a share is submitted, the proxy reconstructs the full extranonce before forwarding upstream.
+- Node.js 18+
+- CKB full node with `block_assembler` configured (see [CKB docs](https://github.com/nervosnetwork/ckb))
+- `--ba-advanced` flag on CKB node
 
-## Notes
+## Tested Miners
 
-- Tested with ViaBTC CKB pool (`mining.viabtc.io:3001`)
-- Supports `mining.set_target` (ViaBTC-style difficulty) and `mining.set_difficulty` (standard stratum)
-- NerdMiner CKB connects fine — just update its pool address to `stratum+tcp://<pi-ip>:3333`
-- `config.json` is gitignored — never committed
+| Miner | Status |
+|-------|--------|
+| Goldshell CKBox | ✅ Working |
+| NerdMiner CKB (ESP32) | ✅ Working |
+
+## License
+
+MIT
