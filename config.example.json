@@ -1,33 +1,27 @@
 {
-  "_comment": "Remove the mode you don't want. Use 'solo' for local node, 'pool' for upstream pool.",
-
-  "mode": "solo",
-
-  "node": {
-    "host"    : "127.0.0.1",
-    "port"    : 8114,
-    "coinbase": "ckb1qyqYOURADDRESS"
-  },
-
   "pool": {
     "host": "mining.viabtc.io",
     "port": 3001,
-    "user": "ckb1qyqYOURADDRESS.ProxyWorker",
+    "user": "YOUR_CKB_ADDRESS.WorkerName",
     "pass": "x"
   },
-
   "local": {
-    "host"      : "0.0.0.0",
-    "port"      : 3333,
-    "statsPort" : 8081
+    "host": "0.0.0.0",
+    "port": 3333,
+    "statsPort": 8081
   },
-
+  "node": {
+    "host": "127.0.0.1",
+    "port": 8114,
+    "coinbase": "ckb1qyq..."
+  },
+  "mode": "solo",
   "vardiff": {
-    "targetShareSec"  : 30,
-    "retargetSec"     : 60,
-    "variancePercent" : 30,
-    "minDiff"         : 0.001,
-    "maxDiff"         : 1000000000,
-    "initialDiff"     : 1.0
+    "targetShareSec": 30,
+    "retargetSec": 60,
+    "variancePercent": 30,
+    "minDiff": 1,
+    "maxDiff": 1000000000,
+    "initialDiff": 7000
   }
 }
