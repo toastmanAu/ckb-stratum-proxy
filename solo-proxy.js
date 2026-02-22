@@ -119,12 +119,17 @@ function meetsTargetLE(hashBuf, targetHex) {
 }
 
 // ── CKB Node RPC ─────────────────────────────────────────────────────────────
+let nodeHealthy    = true;
+let nodeFailCount  = 0;
+const NODE_TIMEOUT = 8000;  // 8s timeout on RPC calls
+
 function rpc(method, params) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
     const req  = http.request({
       host: NODE_HOST, port: NODE_PORT, method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: NODE_TIMEOUT,
     }, res => {
       let d = ''; res.on('data', c => d += c);
       res.on('end', () => {
@@ -135,26 +140,42 @@ function rpc(method, params) {
         } catch (e) { reject(e); }
       });
     });
+    req.on('timeout', () => {
+      req.destroy(new Error(`RPC timeout: ${method}`));
+    });
     req.on('error', reject);
     req.write(body); req.end();
   });
 }
 
 // ── Block template polling ────────────────────────────────────────────────────
+let lastTemplateTime = 0;
+
 async function fetchTemplate() {
   try {
-    // get_block_template([bytes_limit, proposals_limit, max_version])
     const tpl = await rpc('get_block_template', [null, null, null]);
 
     // Check if it's a new template (different work_id or parent_hash)
     if (currentTemplate &&
         tpl.work_id === currentTemplate.work_id &&
         tpl.parent_hash === currentTemplate.parent_hash) {
-      return;  // same template, no update needed
+      // Same template — but update timestamp field so miners get fresh nonce space
+      // (avoids nonce collisions if same job runs for many seconds)
+      currentTemplate.current_time = tpl.current_time;
+      lastTemplateTime = Date.now();
+      return;
     }
 
-    currentTemplate = tpl;
-    currentJobId    = (currentJobId + 1) & 0xffffffff;
+    // Node recovered after failures
+    if (!nodeHealthy) {
+      log('NODE', `CKB node recovered after ${nodeFailCount} failures`);
+      nodeHealthy   = true;
+      nodeFailCount = 0;
+    }
+
+    currentTemplate  = tpl;
+    currentJobId     = (currentJobId + 1) & 0xffffffff;
+    lastTemplateTime = Date.now();
 
     // Compute pow_hash from the template's header fields
     const fields = templateToHeaderFields(tpl);
@@ -167,7 +188,14 @@ async function fetchTemplate() {
 
     broadcastJob(false);
   } catch (e) {
-    log('NODE', 'get_block_template error:', e.message);
+    nodeFailCount++;
+    if (nodeHealthy) {
+      log('NODE', `CKB node error: ${e.message}`);
+      nodeHealthy = false;
+    } else if (nodeFailCount % 30 === 0) {
+      // Log every 60s (30 × 2s poll) to avoid log spam
+      log('NODE', `Still unreachable after ${nodeFailCount} attempts (${Math.round(nodeFailCount*2/60)}min)`);
+    }
   }
 }
 
@@ -190,6 +218,15 @@ function startPolling() {
   fetchTemplate();
   // Poll every 2 seconds — CKB blocks are ~6s
   pollTimer = setInterval(fetchTemplate, 2000);
+
+  // Watchdog: if we haven't gotten a new template in 5 minutes, log loudly
+  setInterval(() => {
+    if (!lastTemplateTime) return;
+    const staleSec = Math.floor((Date.now() - lastTemplateTime) / 1000);
+    if (staleSec > 300) {
+      log('WARN', `Template is ${staleSec}s old — CKB node may be stuck or offline`);
+    }
+  }, 60000);
 }
 
 // ── Stratum job format ────────────────────────────────────────────────────────
@@ -502,9 +539,11 @@ const statsServer = http.createServer((req, res) => {
 
   const data = {
     node    : `${NODE_HOST}:${NODE_PORT}`,
+    nodeHealthy,
     coinbase: COINBASE,
-    status  : currentTemplate ? 'active' : 'waiting',
+    status  : currentTemplate ? (nodeHealthy ? 'active' : 'node-error') : 'waiting',
     uptime  : fmtUptime(uptime),
+    templateAge: lastTemplateTime ? Math.floor((Date.now() - lastTemplateTime) / 1000) : null,
     block   : currentTemplate ? {
       height : parseInt(currentTemplate.number, 16),
       epoch  : currentTemplate.epoch,
