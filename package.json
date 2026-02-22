@@ -1,0 +1,10 @@
+{
+  "name": "ckb-stratum-proxy",
+  "version": "1.0.0",
+  "description": "Local Stratum proxy for CKB (Eaglesong) mining — connect any miner to your local network",
+  "main": "proxy.js",
+  "scripts": {
+    "start": "node proxy.js"
+  },
+  "license": "MIT"
+}

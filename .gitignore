@@ -1,0 +1,4 @@
+config.json
+proxy.pid
+proxy.log
+node_modules/
