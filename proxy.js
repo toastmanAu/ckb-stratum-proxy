@@ -3,40 +3,59 @@
 
 const net  = require('net');
 const http = require('http');
+const { hashCKB, meetsTarget, selftest } = require('./eaglesong.js');
+
+// ── Eaglesong self-test ───────────────────────────────────────────────────────
+try {
+  selftest();
+  console.log('[PROXY] Eaglesong self-test OK');
+} catch (e) {
+  console.error('[PROXY] FATAL:', e.message);
+  process.exit(1);
+}
 
 // ── Config ────────────────────────────────────────────────────────────────────
 let config;
-try {
-  config = require('./config.json');
-} catch (e) {
+try { config = require('./config.json'); } catch (e) {
   console.error('[proxy] Missing config.json — copy config.example.json and fill in your details');
   process.exit(1);
 }
 
 const UPSTREAM_HOST = config.pool.host;
 const UPSTREAM_PORT = config.pool.port;
-const UPSTREAM_USER = config.pool.user;   // e.g. ckb1qyq....usvlg.Wyltek
+const UPSTREAM_USER = config.pool.user;
 const UPSTREAM_PASS = config.pool.pass || 'x';
 
-const LOCAL_HOST   = config.local?.host       || '0.0.0.0';
-const LOCAL_PORT   = config.local?.port       || 3333;
-const STATS_PORT   = config.local?.statsPort  || 8081;
-const LOCAL_DIFF   = config.local?.difficulty || null;   // null = inherit pool diff
+const LOCAL_HOST  = config.local?.host      || '0.0.0.0';
+const LOCAL_PORT  = config.local?.port      || 3333;
+const STATS_PORT  = config.local?.statsPort || 8081;
+
+// Vardiff settings
+const VARDIFF = {
+  targetShareSec : config.vardiff?.targetShareSec  || 30,   // aim for 1 share every N seconds
+  retargetSec    : config.vardiff?.retargetSec      || 60,   // check interval
+  variancePercent: config.vardiff?.variancePercent  || 30,   // ±30% tolerance
+  minDiff        : config.vardiff?.minDiff          || 0.001,
+  maxDiff        : config.vardiff?.maxDiff          || 1e9,
+  // Initial difficulty sent to miners before pool diff is known.
+  // null = wait for pool diff; number = send this immediately on connect.
+  initialDiff    : config.vardiff?.initialDiff      ?? null,
+};
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let upstream          = null;
-let upstreamBuf       = '';
-let upstreamReady     = false;
-let reconnectDelay    = 2000;
+let upstream        = null;
+let upstreamBuf     = '';
+let upstreamReady   = false;
+let reconnectDelay  = 2000;
 
 let poolExtranonce1     = '';
 let poolExtranonce2Size = 0;
-let currentJob          = null;   // last mining.notify params
-let currentTarget       = null;   // last mining.set_target param
-let poolDifficulty      = null;   // last mining.set_difficulty param
+let currentJob          = null;  // last mining.notify params
+let currentTarget       = null;  // last mining.set_target hex (LE 64 chars)
+let poolDifficulty      = null;  // from mining.set_difficulty
 
 let minerIdCounter = 0;
-const miners = new Map();         // minerId → miner object
+const miners = new Map();
 
 const totals = {
   sharesSubmitted : 0,
@@ -45,7 +64,6 @@ const totals = {
   startTime       : Date.now(),
 };
 
-// Pending upstream requests waiting for response: upstreamId → {type, miner?, originalId?}
 const pendingUpstream = new Map();
 let upstreamRequestId = 100;
 
@@ -55,7 +73,105 @@ function log(tag, ...args) {
   console.log(`[${ts}] [${tag.padEnd(5)}]`, ...args);
 }
 
-// ── Upstream (pool) connection ────────────────────────────────────────────────
+// ── Target / difficulty helpers ───────────────────────────────────────────────
+// CKB target is 64-char LE hex.
+// difficulty is an abstract unit: diff=1 ≈ pool base target.
+// We scale the pool target up (easier) to create a local target.
+// poolTarget × (poolDiff / localDiff) = localTarget (bigger = easier).
+// We keep target ≤ 0xFFFF...FF (256 bits).
+
+const MAX256 = (1n << 256n) - 1n;
+
+/** Hex LE string → BigInt (little-endian byte order) */
+function hexLEToBigInt(hex) {
+  if (!hex || hex.length !== 64) return 0n;
+  // reverse bytes for big-endian interpretation
+  let beHex = '';
+  for (let i = 62; i >= 0; i -= 2) beHex += hex.slice(i, i+2);
+  return BigInt('0x' + beHex);
+}
+
+/** BigInt → hex LE string (64 chars) */
+function bigIntToHexLE(n) {
+  if (n <= 0n) return '0'.repeat(64);
+  if (n > MAX256) n = MAX256;
+  let beHex = n.toString(16).padStart(64, '0');
+  let leHex = '';
+  for (let i = 62; i >= 0; i -= 2) leHex += beHex.slice(i, i+2);
+  return leHex;
+}
+
+/** Compute a local target for a given local difficulty, using the pool target as base. */
+function localTargetForDiff(localDiff) {
+  if (!currentTarget || !poolDifficulty || localDiff <= 0) return currentTarget;
+  const poolTargetBig = hexLEToBigInt(currentTarget);
+  // localTarget = poolTarget * (poolDiff / localDiff)
+  // Use BigInt: multiply by poolDiff*1e6, divide by localDiff*1e6 to preserve precision
+  const scale = 1_000_000n;
+  const poolDiffScaled  = BigInt(Math.round(poolDifficulty * 1_000_000));
+  const localDiffScaled = BigInt(Math.round(localDiff      * 1_000_000));
+  let localTarget = (poolTargetBig * poolDiffScaled) / localDiffScaled;
+  if (localTarget > MAX256) localTarget = MAX256;
+  return bigIntToHexLE(localTarget);
+}
+
+// ── Vardiff engine ────────────────────────────────────────────────────────────
+function computeNewDiff(miner) {
+  const now = Date.now();
+  const windowMs = now - miner.vardiff.windowStart;
+  if (windowMs < 1000) return miner.vardiff.currentDiff;
+
+  const shareCount = miner.vardiff.sharesInWindow;
+  const actualShareSec = windowMs / 1000 / Math.max(shareCount, 1);
+  const target = VARDIFF.targetShareSec;
+  const variance = VARDIFF.variancePercent / 100;
+
+  // Within tolerance — don't change
+  if (Math.abs(actualShareSec - target) / target <= variance) {
+    return miner.vardiff.currentDiff;
+  }
+
+  // Scale: newDiff = currentDiff * (actualShareSec / targetShareSec)
+  // More shares than expected → actualShareSec < target → diff should go up (× >1 when ratio <1)
+  // Fewer shares than expected → actualShareSec > target → diff should go down (× <1 when ratio >1)
+  let ratio = target / actualShareSec;  // >1 means miner is fast → increase diff
+  // Clamp adjustment to 4× per interval
+  ratio = Math.min(Math.max(ratio, 0.25), 4.0);
+
+  let newDiff = miner.vardiff.currentDiff * ratio;
+  newDiff = Math.min(Math.max(newDiff, VARDIFF.minDiff), VARDIFF.maxDiff);
+
+  return newDiff;
+}
+
+function checkVardiff(miner) {
+  const now = Date.now();
+  if (now - miner.vardiff.lastRetarget < VARDIFF.retargetSec * 1000) return;
+
+  const newDiff = computeNewDiff(miner);
+  miner.vardiff.windowStart  = now;
+  miner.vardiff.sharesInWindow = 0;
+  miner.vardiff.lastRetarget = now;
+
+  if (newDiff !== miner.vardiff.currentDiff) {
+    const old = miner.vardiff.currentDiff;
+    miner.vardiff.currentDiff = newDiff;
+    log('VDIFF', `#${miner.id} ${miner.worker}: ${old.toFixed(4)} → ${newDiff.toFixed(4)}`);
+    sendLocalTarget(miner);
+  }
+}
+
+function sendLocalTarget(miner) {
+  const t = localTargetForDiff(miner.vardiff.currentDiff);
+  if (t) sendToMiner(miner, { id: null, method: 'mining.set_target', params: [t] });
+  // Also send set_difficulty for miners that use it
+  const d = miner.vardiff.currentDiff;
+  if (poolDifficulty != null) {
+    sendToMiner(miner, { id: null, method: 'mining.set_difficulty', params: [d] });
+  }
+}
+
+// ── Upstream connection ───────────────────────────────────────────────────────
 function connectUpstream() {
   log('UP', `Connecting to ${UPSTREAM_HOST}:${UPSTREAM_PORT}...`);
   upstream    = new net.Socket();
@@ -68,7 +184,7 @@ function connectUpstream() {
     subscribeUpstream();
   });
 
-  upstream.on('data', (data) => {
+  upstream.on('data', data => {
     upstreamBuf += data.toString();
     let nl;
     while ((nl = upstreamBuf.indexOf('\n')) !== -1) {
@@ -86,20 +202,18 @@ function connectUpstream() {
     reconnectDelay = Math.min(reconnectDelay * 2, 60000);
   });
 
-  upstream.on('error', (err) => {
-    log('UP', 'Error:', err.message);
-  });
+  upstream.on('error', err => log('UP', 'Error:', err.message));
 }
 
 function sendUpstream(obj) {
-  if (!upstream || !upstream.writable) return false;
+  if (!upstream?.writable) return false;
   upstream.write(JSON.stringify(obj) + '\n');
   return true;
 }
 
 function subscribeUpstream() {
   const id = upstreamRequestId++;
-  sendUpstream({ id, method: 'mining.subscribe', params: ['ckb-stratum-proxy/1.0'] });
+  sendUpstream({ id, method: 'mining.subscribe', params: ['ckb-stratum-proxy/1.1'] });
   pendingUpstream.set(id, { type: 'subscribe' });
 }
 
@@ -111,10 +225,7 @@ function authorizeUpstream() {
 
 function handleUpstreamMessage(line) {
   let msg;
-  try { msg = JSON.parse(line); } catch (e) {
-    log('UP', 'Bad JSON:', line.slice(0, 80));
-    return;
-  }
+  try { msg = JSON.parse(line); } catch { log('UP', 'Bad JSON:', line.slice(0,80)); return; }
 
   // Response to one of our requests
   if (msg.id != null && pendingUpstream.has(msg.id)) {
@@ -133,12 +244,12 @@ function handleUpstreamMessage(line) {
         if (msg.result === true) {
           totals.sharesAccepted++;
           miner.sharesAccepted++;
-          log('SHARE', `✓ accepted from ${miner.worker}`);
+          log('SHARE', `✓ pool accepted from ${miner.worker}`);
           sendToMiner(miner, { id: originalId, result: true, error: null });
         } else {
           totals.sharesRejected++;
           miner.sharesRejected++;
-          log('SHARE', `✗ rejected from ${miner.worker}:`, JSON.stringify(msg.error));
+          log('SHARE', `✗ pool rejected from ${miner.worker}:`, JSON.stringify(msg.error));
           sendToMiner(miner, { id: originalId, result: false, error: msg.error });
         }
         return;
@@ -146,7 +257,7 @@ function handleUpstreamMessage(line) {
     }
   }
 
-  // Pool notifications
+  // Notifications
   switch (msg.method) {
     case 'mining.notify':
       currentJob = msg.params;
@@ -156,52 +267,44 @@ function handleUpstreamMessage(line) {
 
     case 'mining.set_target':
       currentTarget = msg.params[0];
-      log('POOL', `set_target → ${currentTarget}`);
-      broadcastToMiners({ id: null, method: 'mining.set_target', params: [currentTarget] });
+      log('POOL', `set_target → ${currentTarget.slice(0,16)}...`);
+      // Don't relay pool target directly — send each miner their vardiff target
+      for (const [, miner] of miners) {
+        if (miner.authorized) sendLocalTarget(miner);
+      }
       break;
 
     case 'mining.set_difficulty':
       poolDifficulty = msg.params[0];
       log('POOL', `set_difficulty → ${poolDifficulty}`);
-      broadcastDifficulty();
+      for (const [, miner] of miners) {
+        if (miner.authorized) sendLocalTarget(miner);
+      }
       break;
 
     default:
-      log('UP', `Unhandled method: ${msg.method}`);
+      log('UP', `Unhandled: ${msg.method}`);
   }
 }
 
 function handleUpstreamResponse(ctx, msg) {
   if (ctx.type === 'subscribe') {
-    if (!msg.result) {
-      log('UP', 'Subscribe FAILED:', msg.error);
-      return;
-    }
-    // Standard stratum: [subscriptions_array, extranonce1, extranonce2_size]
-    // Some pools: [null, extranonce1, extranonce2_size]
-    const en1    = msg.result[1];
-    const en2sz  = msg.result[2];
-    poolExtranonce1     = en1   || '';
-    poolExtranonce2Size = en2sz || 8;
-    log('UP', `Subscribed: extranonce1=${poolExtranonce1} extranonce2_size=${poolExtranonce2Size}`);
+    if (!msg.result) { log('UP', 'Subscribe FAILED:', msg.error); return; }
+    poolExtranonce1     = msg.result[1] || '';
+    poolExtranonce2Size = msg.result[2] || 8;
+    log('UP', `Subscribed: en1=${poolExtranonce1} en2sz=${poolExtranonce2Size}`);
     authorizeUpstream();
-
   } else if (ctx.type === 'authorize') {
     if (msg.result) {
       log('UP', `Authorized as ${UPSTREAM_USER}`);
       upstreamReady = true;
     } else {
-      log('UP', 'Authorization FAILED:', msg.error);
+      log('UP', 'Auth FAILED:', msg.error);
     }
   }
 }
 
 // ── Extranonce allocation ─────────────────────────────────────────────────────
-// We reserve 1 byte (2 hex chars) per miner as a suffix on pool's extranonce1.
-// Miner extranonce1  = poolExtranonce1 + minerIdByte (hex)
-// Miner extranonce2_size = poolExtranonce2Size - 1
-// When forwarding a share, prepend minerIdByte to the miner's extranonce2.
-
 function minerExtranonce(minerId) {
   const suffix = (minerId & 0xff).toString(16).padStart(2, '0');
   return {
@@ -211,23 +314,17 @@ function minerExtranonce(minerId) {
 }
 
 function buildFullExtranonce2(miner, minerEn2) {
-  const suffix = (miner.id & 0xff).toString(16).padStart(2, '0');
-  return suffix + minerEn2;
+  return (miner.id & 0xff).toString(16).padStart(2, '0') + minerEn2;
 }
 
-// ── Broadcast helpers ─────────────────────────────────────────────────────────
+// ── Broadcast ─────────────────────────────────────────────────────────────────
 function broadcastToMiners(obj) {
   for (const [, miner] of miners) {
     if (miner.authorized) sendToMiner(miner, obj);
   }
 }
 
-function broadcastDifficulty() {
-  const diff = LOCAL_DIFF != null ? LOCAL_DIFF : poolDifficulty;
-  broadcastToMiners({ id: null, method: 'mining.set_difficulty', params: [diff] });
-}
-
-// ── Miner (downstream) server ─────────────────────────────────────────────────
+// ── Miner server ──────────────────────────────────────────────────────────────
 function sendToMiner(miner, obj) {
   if (!miner.socket?.writable) return;
   try { miner.socket.write(JSON.stringify(obj) + '\n'); } catch (_) {}
@@ -235,7 +332,7 @@ function sendToMiner(miner, obj) {
 
 function handleMinerMessage(miner, line) {
   let msg;
-  try { msg = JSON.parse(line); } catch (e) { return; }
+  try { msg = JSON.parse(line); } catch { return; }
 
   switch (msg.method) {
 
@@ -252,22 +349,74 @@ function handleMinerMessage(miner, line) {
       miner.authorized = true;
       sendToMiner(miner, { id: msg.id, result: true, error: null });
       log('MINER', `#${miner.id} authorized as ${miner.worker}`);
-      // Send current pool state immediately
-      if (currentTarget)    sendToMiner(miner, { id: null, method: 'mining.set_target',     params: [currentTarget] });
-      if (poolDifficulty)   sendToMiner(miner, { id: null, method: 'mining.set_difficulty', params: [LOCAL_DIFF != null ? LOCAL_DIFF : poolDifficulty] });
-      if (currentJob)       sendToMiner(miner, { id: null, method: 'mining.notify',         params: currentJob });
+
+      // Determine initial difficulty
+      if (VARDIFF.initialDiff != null) {
+        miner.vardiff.currentDiff = VARDIFF.initialDiff;
+      } else if (poolDifficulty != null) {
+        miner.vardiff.currentDiff = poolDifficulty;
+      }
+
+      // Send current mining state
+      if (currentTarget || poolDifficulty != null) sendLocalTarget(miner);
+      if (currentJob) sendToMiner(miner, { id: null, method: 'mining.notify', params: currentJob });
       break;
     }
 
     case 'mining.submit': {
       totals.sharesSubmitted++;
       miner.sharesSubmitted++;
-      const [, jobId, en2, ntime, nonce] = msg.params;
+      miner.vardiff.sharesInWindow++;
+      checkVardiff(miner);
+
+      const [workerName, jobId, en2, ntime, nonce] = msg.params;
       const fullEn2 = buildFullExtranonce2(miner, en2);
-      const upId    = upstreamRequestId++;
-      miner.pendingShares.set(upId, { originalId: msg.id });
-      sendUpstream({ id: upId, method: 'mining.submit', params: [UPSTREAM_USER, jobId, fullEn2, ntime, nonce] });
-      log('MINER', `#${miner.id} share submitted job=${jobId}`);
+
+      // Validate share against the local (easy) target — accept for stats
+      let localAccept = true;
+      let meetsPool   = false;
+
+      if (currentJob && currentTarget && nonce) {
+        const powHash = currentJob[1];   // hex string
+        // Reconstruct full nonce: extranonce1+suffix+en2 || nonce_from_miner
+        // CKB nonce layout: bytes 0-7 = counter (from miner nonce field), bytes 8-15 = extranonce
+        // ViaBTC stratum: nonce submitted as 32-char hex (16 bytes)
+        try {
+          const hash = hashCKB(powHash, nonce.padStart(32, '0'));
+
+          // Check pool target
+          meetsPool = meetsTarget(hash, currentTarget);
+
+          // Check local (vardiff) target
+          const localTarget = localTargetForDiff(miner.vardiff.currentDiff);
+          localAccept = localTarget ? meetsTarget(hash, localTarget) : true;
+
+          if (!localAccept) {
+            log('SHARE', `#${miner.id} stale/low-diff share (below local target)`);
+            sendToMiner(miner, { id: msg.id, result: false, error: [23, 'Low difficulty share', null] });
+            return;
+          }
+        } catch (e) {
+          log('SHARE', `#${miner.id} validation error: ${e.message} — forwarding anyway`);
+          meetsPool = true;  // forward on error, let pool decide
+        }
+      } else {
+        meetsPool = true;  // no job/target yet, forward
+      }
+
+      if (meetsPool) {
+        // Forward to pool
+        const upId = upstreamRequestId++;
+        miner.pendingShares.set(upId, { originalId: msg.id });
+        sendUpstream({ id: upId, method: 'mining.submit', params: [UPSTREAM_USER, jobId, fullEn2, ntime, nonce] });
+        log('SHARE', `#${miner.id} → pool (job=${jobId})`);
+      } else {
+        // Local accept only — counts for hashrate, not forwarded
+        miner.sharesLocalOnly++;
+        miner.sharesAccepted++;  // count locally for display
+        log('SHARE', `#${miner.id} local accept (below pool diff, not forwarded)`);
+        sendToMiner(miner, { id: msg.id, result: true, error: null });
+      }
       break;
     }
 
@@ -276,7 +425,6 @@ function handleMinerMessage(miner, line) {
       break;
 
     case 'mining.extranonce.subscribe':
-      // Acknowledge but we handle extranonce allocation ourselves
       sendToMiner(miner, { id: msg.id, result: true, error: null });
       break;
 
@@ -285,26 +433,33 @@ function handleMinerMessage(miner, line) {
   }
 }
 
-const minerServer = net.createServer((socket) => {
+const minerServer = net.createServer(socket => {
   const id    = minerIdCounter++;
+  const now   = Date.now();
   const miner = {
     id,
     socket,
-    authorized    : false,
-    worker        : 'unknown',
-    buf           : '',
+    authorized     : false,
+    worker         : 'unknown',
+    buf            : '',
     sharesSubmitted: 0,
     sharesAccepted : 0,
     sharesRejected : 0,
-    connectedAt   : Date.now(),
-    pendingShares : new Map(),
+    sharesLocalOnly: 0,
+    connectedAt    : now,
+    extranonce2Size: 0,
+    pendingShares  : new Map(),
+    vardiff: {
+      currentDiff   : VARDIFF.initialDiff ?? 1.0,
+      windowStart   : now,
+      sharesInWindow: 0,
+      lastRetarget  : now,
+    },
   };
   miners.set(id, miner);
+  log('MINER', `#${id} connected from ${socket.remoteAddress}:${socket.remotePort}`);
 
-  const remote = `${socket.remoteAddress}:${socket.remotePort}`;
-  log('MINER', `#${id} connected from ${remote}`);
-
-  socket.on('data', (data) => {
+  socket.on('data', data => {
     miner.buf += data.toString();
     let nl;
     while ((nl = miner.buf.indexOf('\n')) !== -1) {
@@ -319,24 +474,20 @@ const minerServer = net.createServer((socket) => {
     miners.delete(id);
   });
 
-  socket.on('error', (err) => {
-    log('MINER', `#${id} socket error: ${err.message}`);
-  });
+  socket.on('error', err => log('MINER', `#${id} error: ${err.message}`));
 });
 
-minerServer.on('error', (err) => {
+minerServer.on('error', err => {
   if (err.code === 'EADDRINUSE') {
-    log('ERROR', `Port ${LOCAL_PORT} already in use — is the proxy already running?`);
+    log('ERROR', `Port ${LOCAL_PORT} in use — already running?`);
     process.exit(1);
   }
   throw err;
 });
 
-// ── Stats HTTP server ─────────────────────────────────────────────────────────
-function formatUptime(sec) {
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
+// ── Stats HTTP ────────────────────────────────────────────────────────────────
+function fmtUptime(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
   return `${h}h ${m}m ${s}s`;
 }
 
@@ -348,65 +499,56 @@ const statsServer = http.createServer((req, res) => {
   }
 
   const uptime = Math.floor((Date.now() - totals.startTime) / 1000);
-
   const minerList = [...miners.values()].map(m => ({
     id             : m.id,
     worker         : m.worker,
-    authorized     : m.authorized,
     address        : m.socket?.remoteAddress,
     uptimeSec      : Math.floor((Date.now() - m.connectedAt) / 1000),
+    difficulty     : +m.vardiff.currentDiff.toFixed(4),
     sharesSubmitted: m.sharesSubmitted,
     sharesAccepted : m.sharesAccepted,
     sharesRejected : m.sharesRejected,
+    sharesLocalOnly: m.sharesLocalOnly,
   }));
 
   const data = {
     proxy: {
-      uptime        : formatUptime(uptime),
-      upstream      : `${UPSTREAM_HOST}:${UPSTREAM_PORT}`,
+      uptime, uptimeFmt: fmtUptime(uptime),
+      upstream: `${UPSTREAM_HOST}:${UPSTREAM_PORT}`,
       upstreamReady,
-      currentJobId  : currentJob ? currentJob[0] : null,
-      blockHeight   : currentJob ? currentJob[2] : null,
+      currentJobId  : currentJob?.[0] ?? null,
+      blockHeight   : currentJob?.[2] ?? null,
       poolDifficulty,
-      localDifficulty: LOCAL_DIFF,
-      currentTarget,
+      currentTarget : currentTarget ? currentTarget.slice(0,16)+'...' : null,
+    },
+    vardiff: {
+      targetShareSec : VARDIFF.targetShareSec,
+      retargetSec    : VARDIFF.retargetSec,
+      variancePercent: VARDIFF.variancePercent,
     },
     shares: {
       submitted : totals.sharesSubmitted,
       accepted  : totals.sharesAccepted,
       rejected  : totals.sharesRejected,
       acceptRate: totals.sharesSubmitted > 0
-        ? ((totals.sharesAccepted / totals.sharesSubmitted) * 100).toFixed(1) + '%'
-        : 'n/a',
+        ? ((totals.sharesAccepted / totals.sharesSubmitted) * 100).toFixed(1) + '%' : 'n/a',
     },
-    miners: {
-      count: miners.size,
-      list : minerList,
-    },
+    miners: { count: miners.size, list: minerList },
   };
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data, null, 2));
 });
 
-statsServer.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    log('WARN', `Stats port ${STATS_PORT} already in use — stats disabled`);
-  }
+statsServer.on('error', err => {
+  if (err.code === 'EADDRINUSE') log('WARN', `Stats port ${STATS_PORT} in use — stats disabled`);
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
-minerServer.listen(LOCAL_PORT, LOCAL_HOST, () => {
-  log('PROXY', `Stratum server listening on ${LOCAL_HOST}:${LOCAL_PORT}`);
-});
-
-statsServer.listen(STATS_PORT, () => {
-  log('PROXY', `Stats HTTP on http://localhost:${STATS_PORT}/`);
-});
-
+minerServer.listen(LOCAL_PORT, LOCAL_HOST, () => log('PROXY', `Stratum on ${LOCAL_HOST}:${LOCAL_PORT}`));
+statsServer.listen(STATS_PORT, () => log('PROXY', `Stats on http://localhost:${STATS_PORT}/`));
 connectUpstream();
 
-log('PROXY', '─── CKB Stratum Proxy started ───');
-log('PROXY', `Upstream : ${UPSTREAM_HOST}:${UPSTREAM_PORT} as ${UPSTREAM_USER}`);
-log('PROXY', `Local    : ${LOCAL_HOST}:${LOCAL_PORT}`);
-if (LOCAL_DIFF != null) log('PROXY', `Local diff override: ${LOCAL_DIFF}`);
+log('PROXY', '─── CKB Stratum Proxy v1.1 ───');
+log('PROXY', `Upstream  : ${UPSTREAM_HOST}:${UPSTREAM_PORT} as ${UPSTREAM_USER}`);
+log('PROXY', `Vardiff   : target=${VARDIFF.targetShareSec}s  retarget=${VARDIFF.retargetSec}s  ±${VARDIFF.variancePercent}%`);

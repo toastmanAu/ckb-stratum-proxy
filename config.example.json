@@ -2,13 +2,20 @@
   "pool": {
     "host": "mining.viabtc.io",
     "port": 3001,
-    "user": "ckb1qyqYOURADDRESS.WorkerName",
+    "user": "ckb1qyqYOURADDRESS.ProxyWorker",
     "pass": "x"
   },
   "local": {
     "host": "0.0.0.0",
     "port": 3333,
-    "statsPort": 8081,
-    "difficulty": null
+    "statsPort": 8081
+  },
+  "vardiff": {
+    "targetShareSec"  : 30,
+    "retargetSec"     : 60,
+    "variancePercent" : 30,
+    "minDiff"         : 0.001,
+    "maxDiff"         : 1000000000,
+    "initialDiff"     : null
   }
 }
