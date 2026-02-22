@@ -82,16 +82,17 @@ function compactToTargetLE(compact) {
 }
 
 /** Scale a pool-difficulty target to a local difficulty */
+// Standard CKB stratum diff=1 reference: 2^224
+// This matches industry convention — hashes/share at diff=1 = 2^32
+const DIFF1_TARGET = (1n << 224n);
+
 function diffToTargetLE(diff) {
-  // Reference: diff=1 target is the genesis/initial target
-  // We derive from compact_target: localTarget = poolTarget * (poolDiff / localDiff)
-  // For solo mining, pool difficulty comes from the node's compact_target
-  // We treat compact_target as "difficulty 1" baseline and scale from there.
-  // This isn't exactly standard but works for vardiff purposes.
-  if (!currentTargetLE) return null;
-  if (diff <= 0) return currentTargetLE;
-  const poolTarget = hexLEToBigInt(currentTargetLE);
-  let local = (poolTarget * 1_000_000n) / BigInt(Math.round(diff * 1_000_000));
+  // Target = DIFF1_TARGET / diff
+  // diff=1 → 2^224 (easy, ~1 share per 2^32 hashes at any hashrate)
+  // diff=N → 2^224/N (N times harder, N times fewer shares)
+  if (diff <= 0) return bigIntToHexLE(DIFF1_TARGET);
+  const diffBig = BigInt(Math.round(diff * 1_000_000));
+  let local = (DIFF1_TARGET * 1_000_000n) / diffBig;
   if (local > MASK256) local = MASK256;
   return bigIntToHexLE(local);
 }
@@ -507,8 +508,8 @@ const statsServer = http.createServer((req, res) => {
   }
   const uptime = Math.floor((Date.now() - totals.startTime) / 1000);
 
-  // Hashrate estimate per miner: diff × (accepted/uptime) × 2^32
-  // Then format to human-readable
+    // Hashrate estimate: sps × diff × 2^32
+  // Standard CKB stratum formula — diff=1 baseline is 2^32 hashes/share
   function fmtHashrate(hps) {
     if (hps >= 1e12) return (hps / 1e12).toFixed(2) + ' TH/s';
     if (hps >= 1e9)  return (hps / 1e9).toFixed(2)  + ' GH/s';
@@ -518,7 +519,7 @@ const statsServer = http.createServer((req, res) => {
   }
 
   const minerList = [...miners.values()].map(m => {
-    const uptimeSec = Math.max(1, Math.floor((Date.now() - m.connectedAt) / 1000));
+    const uptimeSec    = Math.max(1, Math.floor((Date.now() - m.connectedAt) / 1000));
     const sharesPerSec = m.sharesAccepted / uptimeSec;
     const hashrateHps  = sharesPerSec * m.vardiff.currentDiff * Math.pow(2, 32);
     return {
