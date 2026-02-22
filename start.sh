@@ -3,6 +3,16 @@ PROXY_DIR="$(cd "$(dirname "$0")" && pwd)"
 PID_FILE="$PROXY_DIR/proxy.pid"
 LOG_FILE="$PROXY_DIR/proxy.log"
 
+# Determine mode from config.json
+MODE=$(node -e "try{const c=require('$PROXY_DIR/config.json');console.log(c.mode||'pool')}catch(e){console.log('pool')}" 2>/dev/null)
+if [ "$MODE" = "solo" ]; then
+  SCRIPT="$PROXY_DIR/solo-proxy.js"
+  echo "Mode: SOLO (direct to local CKB node)"
+else
+  SCRIPT="$PROXY_DIR/proxy.js"
+  echo "Mode: POOL (upstream pool relay)"
+fi
+
 # Kill any existing instance
 if [ -f "$PID_FILE" ]; then
   OLD_PID=$(cat "$PID_FILE")
@@ -14,8 +24,8 @@ if [ -f "$PID_FILE" ]; then
   rm -f "$PID_FILE"
 fi
 
-echo "Starting CKB Stratum Proxy..."
-nohup node "$PROXY_DIR/proxy.js" >> "$LOG_FILE" 2>&1 &
+echo "Starting CKB Stratum Proxy ($MODE)..."
+nohup node "$SCRIPT" >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 sleep 1
 
@@ -26,5 +36,6 @@ if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   echo "Log     : $LOG_FILE"
 else
   echo "ERROR: Proxy failed to start — check $LOG_FILE"
+  cat "$LOG_FILE" | tail -20
   exit 1
 fi

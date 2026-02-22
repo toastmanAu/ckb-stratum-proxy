@@ -47,18 +47,18 @@ if [ ! -f config.json ]; then
   echo "│    nano $INSTALL_DIR/config.json │"
   echo "└─────────────────────────────────────────────┘"
   echo ""
-  # Pre-fill with sensible defaults for CKB/ViaBTC
+  # Pre-fill with solo mining defaults (direct to local CKB node)
   cat > config.json << 'CONF'
 {
-  "pool": {
-    "host": "mining.viabtc.io",
-    "port": 3001,
-    "user": "ckb1qyqwueud5e9j3lp3chv8qq820s7lxyggd9usvlg.NodeProxy",
-    "pass": "x"
+  "mode": "solo",
+  "node": {
+    "host"    : "127.0.0.1",
+    "port"    : 8114,
+    "coinbase": "ckb1qyqwueud5e9j3lp3chv8qq820s7lxyggd9usvlg"
   },
   "local": {
-    "host": "0.0.0.0",
-    "port": 3333,
+    "host"     : "0.0.0.0",
+    "port"     : 3333,
     "statsPort": 8081
   },
   "vardiff": {
@@ -67,11 +67,11 @@ if [ ! -f config.json ]; then
     "variancePercent" : 30,
     "minDiff"         : 0.001,
     "maxDiff"         : 1000000000,
-    "initialDiff"     : null
+    "initialDiff"     : 1.0
   }
 }
 CONF
-  echo "► Default config written (ViaBTC, port 3333)"
+  echo "► Default config written (solo mode → local CKB node port 8114)"
 else
   echo "✓ config.json already exists — not overwriting"
 fi
@@ -91,7 +91,7 @@ Wants=network-online.target
 Type=simple
 User=$USER
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$NODE_BIN $INSTALL_DIR/proxy.js
+ExecStart=$NODE_BIN $INSTALL_DIR/solo-proxy.js
 Restart=always
 RestartSec=5
 StandardOutput=journal
