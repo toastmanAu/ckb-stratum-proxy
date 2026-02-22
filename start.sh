@@ -23,11 +23,15 @@ if [ -f "$PID_FILE" ]; then
   fi
   rm -f "$PID_FILE"
 fi
+pkill -f "$SCRIPT" 2>/dev/null
+sleep 1
 
 echo "Starting CKB Stratum Proxy ($MODE)..."
-nohup node "$SCRIPT" >> "$LOG_FILE" 2>&1 &
+# Use setsid + disown to fully detach from shell (survives exec session SIGTERM)
+setsid node "$SCRIPT" >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
-sleep 1
+disown $!
+sleep 2
 
 if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   echo "Proxy started (PID $(cat "$PID_FILE"))"
