@@ -294,7 +294,11 @@ function checkVardiff(miner) {
 
 function sendVardiff(miner) {
   const t = diffToTargetLE(miner.vardiff.currentDiff);
-  if (t) sendToMiner(miner, { id: null, method: 'mining.set_target', params: [t] });
+  if (t) {
+    // Send both set_target (NerdMiner) and set_difficulty (Goldshell/intminer)
+    sendToMiner(miner, { id: null, method: 'mining.set_target', params: [t] });
+    sendToMiner(miner, { id: null, method: 'mining.set_difficulty', params: [miner.vardiff.currentDiff] });
+  }
 }
 
 // ── Miner handling ────────────────────────────────────────────────────────────
@@ -310,10 +314,19 @@ function handleMinerMessage(miner, line) {
   switch (msg.method) {
 
     case 'mining.subscribe': {
-      // Extranonce isn't meaningful for solo (we use nonce directly from miner)
-      // Send a dummy extranonce so miners are happy
-      sendToMiner(miner, { id: msg.id, result: [null, 'deadbeef', 8], error: null });
-      log('MINE', `#${miner.id} subscribed`);
+      // Echo back provided session ID for session-resume (Goldshell intminer sends it in params[1])
+      const sessionId = (msg.params && msg.params[1]) || Math.random().toString(16).slice(2, 10);
+      miner._sessionId = sessionId;
+      sendToMiner(miner, {
+        id: msg.id,
+        result: [
+          [['mining.set_difficulty', sessionId], ['mining.notify', sessionId]],
+          sessionId,
+          4,
+        ],
+        error: null,
+      });
+      log('MINE', `#${miner.id} subscribed (session=${sessionId})`);
       break;
     }
 
@@ -339,8 +352,9 @@ function handleMinerMessage(miner, line) {
       const [, jobId, , , nonce] = msg.params;
       const jobIdInt = parseInt(jobId, 16);
 
-      // Stale job?
-      if (jobIdInt !== currentJobId) {
+      // Allow current job or previous job (miners may have buffered work)
+      const prevJobId = (currentJobId - 1) & 0xffffffff;
+      if (jobIdInt !== currentJobId && jobIdInt !== prevJobId) {
         log('MINE', `#${miner.id} stale share (job ${jobId} != current ${currentJobId.toString(16)})`);
         sendToMiner(miner, { id: msg.id, result: false, error: [21, 'Stale share', null] });
         return;
@@ -389,6 +403,12 @@ function handleMinerMessage(miner, line) {
       sendToMiner(miner, { id: msg.id, result: true, error: null });
       break;
 
+    case 'mining.suggest_difficulty':
+    case 'mining.suggest_target':
+      // Acknowledge but let vardiff control the actual difficulty
+      sendToMiner(miner, { id: msg.id, result: true, error: null });
+      break;
+
     default:
       log('MINE', `#${miner.id} unhandled: ${msg.method}`);
   }
@@ -410,7 +430,13 @@ const minerServer = net.createServer(socket => {
   log('MINE', `#${id} connected from ${socket.remoteAddress}`);
 
   socket.on('data', data => {
-    miner.buf += data.toString();
+    const raw = data.toString();
+    // Debug: log first data from new connections for diagnosis
+    if (!miner._firstData) {
+      miner._firstData = true;
+      log('DBG ', `#${id} first data (${raw.length}b): ${raw.slice(0,200).replace(/\n/g,'\\n')}`);
+    }
+    miner.buf += raw;
     let nl;
     while ((nl = miner.buf.indexOf('\n')) !== -1) {
       const line = miner.buf.slice(0, nl).trim();
