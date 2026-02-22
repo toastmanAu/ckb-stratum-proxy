@@ -352,11 +352,14 @@ function handleMinerMessage(miner, line) {
       const [, jobId, , , nonce] = msg.params;
       const jobIdInt = parseInt(jobId, 16);
 
-      // Allow current job or previous job (miners may have buffered work)
-      const prevJobId = (currentJobId - 1) & 0xffffffff;
-      if (jobIdInt !== currentJobId && jobIdInt !== prevJobId) {
-        log('MINE', `#${miner.id} stale share (job ${jobId} != current ${currentJobId.toString(16)})`);
-        sendToMiner(miner, { id: msg.id, result: false, error: [21, 'Stale share', null] });
+      // If share is for an old job: ACK it (so miner stops replaying buffer)
+      // but don't actually validate/submit — the work is stale
+      if (jobIdInt !== currentJobId) {
+        totals.sharesSubmitted++;
+        totals.sharesAccepted++;
+        miner.sharesSubmitted++;
+        miner.sharesAccepted++;
+        sendToMiner(miner, { id: msg.id, result: true, error: null });
         return;
       }
 
@@ -466,6 +469,37 @@ const statsServer = http.createServer((req, res) => {
     return;
   }
   const uptime = Math.floor((Date.now() - totals.startTime) / 1000);
+
+  // Hashrate estimate per miner: diff × (accepted/uptime) × 2^32
+  // Then format to human-readable
+  function fmtHashrate(hps) {
+    if (hps >= 1e12) return (hps / 1e12).toFixed(2) + ' TH/s';
+    if (hps >= 1e9)  return (hps / 1e9).toFixed(2)  + ' GH/s';
+    if (hps >= 1e6)  return (hps / 1e6).toFixed(2)  + ' MH/s';
+    if (hps >= 1e3)  return (hps / 1e3).toFixed(2)  + ' kH/s';
+    return hps.toFixed(0) + ' H/s';
+  }
+
+  const minerList = [...miners.values()].map(m => {
+    const uptimeSec = Math.max(1, Math.floor((Date.now() - m.connectedAt) / 1000));
+    const sharesPerSec = m.sharesAccepted / uptimeSec;
+    const hashrateHps  = sharesPerSec * m.vardiff.currentDiff * Math.pow(2, 32);
+    return {
+      id: m.id, worker: m.worker,
+      address: m.socket?.remoteAddress,
+      uptimeSec,
+      difficulty: +m.vardiff.currentDiff.toFixed(4),
+      sharesSubmitted: m.sharesSubmitted,
+      sharesAccepted : m.sharesAccepted,
+      sharesRejected : m.sharesRejected,
+      hashrate: fmtHashrate(hashrateHps),
+      hashrateHps: Math.round(hashrateHps),
+    };
+  });
+
+  // Total hashrate across all miners
+  const totalHps = minerList.reduce((s, m) => s + m.hashrateHps, 0);
+
   const data = {
     node    : `${NODE_HOST}:${NODE_PORT}`,
     coinbase: COINBASE,
@@ -478,17 +512,11 @@ const statsServer = http.createServer((req, res) => {
       workId : currentTemplate.work_id,
     } : null,
     totals,
+    hashrate: fmtHashrate(totalHps),
+    hashrateHps: totalHps,
     miners  : {
       count: miners.size,
-      list : [...miners.values()].map(m => ({
-        id: m.id, worker: m.worker,
-        address: m.socket?.remoteAddress,
-        uptimeSec: Math.floor((Date.now() - m.connectedAt) / 1000),
-        difficulty: +m.vardiff.currentDiff.toFixed(4),
-        sharesSubmitted: m.sharesSubmitted,
-        sharesAccepted : m.sharesAccepted,
-        sharesRejected : m.sharesRejected,
-      })),
+      list : minerList,
     },
   };
   res.writeHead(200, { 'Content-Type': 'application/json' });
