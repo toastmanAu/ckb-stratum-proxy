@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CKB Solo Mining Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d0d0d; color: #e0e0e0; font-family: 'Courier New', monospace; padding: 20px; }
+  h1 { color: #f7a428; font-size: 1.4em; margin-bottom: 4px; letter-spacing: 2px; }
+  .subtitle { color: #666; font-size: 0.75em; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 16px; }
+  .card.highlight { border-color: #f7a428; }
+  .card.green { border-color: #4caf50; }
+  .card.red { border-color: #f44336; }
+  .card-label { color: #888; font-size: 0.7em; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .card-value { font-size: 1.6em; color: #fff; font-weight: bold; }
+  .card-value.gold { color: #f7a428; }
+  .card-value.green { color: #4caf50; }
+  .card-value.red { color: #f44336; }
+  .card-value.grey { color: #666; }
+  .card-sub { font-size: 0.7em; color: #666; margin-top: 4px; }
+  .section-title { color: #888; font-size: 0.75em; text-transform: uppercase; letter-spacing: 2px; margin: 16px 0 8px; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px; }
+  table { width: 100%; border-collapse: collapse; background: #1a1a1a; border-radius: 6px; overflow: hidden; }
+  th { background: #222; color: #888; font-size: 0.7em; text-transform: uppercase; letter-spacing: 1px; padding: 10px 12px; text-align: left; }
+  td { padding: 10px 12px; border-top: 1px solid #222; font-size: 0.85em; }
+  tr:hover td { background: #222; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot-green { background: #4caf50; box-shadow: 0 0 6px #4caf50; }
+  .dot-red { background: #f44336; box-shadow: 0 0 6px #f44336; }
+  .dot-grey { background: #666; }
+  .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  .last-update { color: #444; font-size: 0.7em; }
+  .progress-bar { background: #2a2a2a; border-radius: 3px; height: 4px; margin-top: 8px; overflow: hidden; }
+  .progress-fill { background: #f7a428; height: 100%; border-radius: 3px; transition: width 0.5s; }
+  .blocks-badge { display: inline-block; background: #f7a42820; border: 1px solid #f7a428; color: #f7a428; padding: 2px 8px; border-radius: 12px; font-size: 0.7em; margin-left: 8px; }
+  #conn-status { font-size: 0.7em; }
+  .expected-time { color: #666; font-size: 0.7em; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="header-row">
+  <div>
+    <h1>⛏ CKB SOLO MINING</h1>
+    <div class="subtitle">Nervos Network · Eaglesong · Solo Mode</div>
+  </div>
+  <div id="conn-status" class="last-update">connecting...</div>
+</div>
+
+<div class="grid">
+  <div class="card highlight">
+    <div class="card-label">Hashrate</div>
+    <div class="card-value gold" id="hashrate">—</div>
+    <div class="card-sub" id="hashrate-sub">—</div>
+  </div>
+  <div class="card" id="card-blocks">
+    <div class="card-label">Blocks Found</div>
+    <div class="card-value" id="blocks-found">—</div>
+    <div class="card-sub" id="expected-time">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Shares Accepted</div>
+    <div class="card-value green" id="shares-accepted">—</div>
+    <div class="card-sub" id="shares-sub">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Block Height</div>
+    <div class="card-value" id="block-height">—</div>
+    <div class="card-sub" id="block-sub">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Node</div>
+    <div class="card-value" id="node-status" style="font-size:1em">—</div>
+    <div class="card-sub" id="uptime-sub">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Miners Online</div>
+    <div class="card-value" id="miner-count">—</div>
+    <div class="card-sub" id="miner-sub">—</div>
+  </div>
+</div>
+
+<div class="section-title">Miners</div>
+<table>
+  <thead>
+    <tr>
+      <th>Worker</th>
+      <th>Status</th>
+      <th>Hashrate</th>
+      <th>Shares</th>
+      <th>Accepted</th>
+      <th>Rejected</th>
+      <th>Difficulty</th>
+      <th>Uptime</th>
+    </tr>
+  </thead>
+  <tbody id="miners-table">
+    <tr><td colspan="8" style="color:#444;text-align:center">Loading...</td></tr>
+  </tbody>
+</table>
+
+<div class="section-title">Pool Info</div>
+<div class="grid">
+  <div class="card">
+    <div class="card-label">Reward Address</div>
+    <div class="card-value" style="font-size:0.65em;word-break:break-all;color:#888" id="coinbase">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Work ID</div>
+    <div class="card-value grey" id="work-id" style="font-size:1em">—</div>
+    <div class="card-sub" id="template-age">—</div>
+  </div>
+</div>
+
+<script>
+const API = '/proxy-stats';
+let lastBlockHeight = 0;
+let blocksHistory = [];
+
+function fmt(n) {
+  if (n >= 1e12) return (n/1e12).toFixed(2) + ' TH/s';
+  if (n >= 1e9)  return (n/1e9).toFixed(2) + ' GH/s';
+  if (n >= 1e6)  return (n/1e6).toFixed(2) + ' MH/s';
+  if (n >= 1e3)  return (n/1e3).toFixed(2) + ' KH/s';
+  return n + ' H/s';
+}
+
+function formatUptime(sec) {
+  if (!sec) return '—';
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm ' + s + 's';
+  return s + 's';
+}
+
+function expectedBlockTime(hashrateHps, networkTarget) {
+  // Approximate: difficulty = 2^256 / target (simplified)
+  // For display, just show rough estimate based on share rate
+  if (!hashrateHps || hashrateHps === 0) return 'Need hashrate to estimate';
+  // CKB network difficulty approx from compact target
+  // Very rough: at 1 MH/s solo, expected time is months/years
+  const hps = hashrateHps;
+  // Use a rough estimate: difficulty ~= 2^64 / hashrateHps seconds
+  // Actually estimate from share difficulty vs block difficulty is complex
+  // Show simple: "~X days at current hashrate" based on network stats
+  const netHashEst = 150e12; // ~150 TH/s rough CKB network
+  const yourShare = hps / netHashEst;
+  if (yourShare <= 0) return '—';
+  const blockEvery6s = 6;
+  const blocksPerDay = 86400 / blockEvery6s;
+  const expectedDays = 1 / (yourShare * blocksPerDay);
+  if (expectedDays < 1) return '~' + (expectedDays * 24).toFixed(1) + ' hours/block';
+  if (expectedDays < 365) return '~' + expectedDays.toFixed(0) + ' days/block';
+  return '~' + (expectedDays/365).toFixed(1) + ' years/block';
+}
+
+async function update() {
+  try {
+    const r = await fetch(API);
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+
+    document.getElementById('conn-status').innerHTML =
+      '<span class="status-dot dot-green"></span>Live · ' + new Date().toLocaleTimeString();
+
+    // Hashrate
+    const hps = d.hashrateHps || 0;
+    document.getElementById('hashrate').textContent = d.hashrate || '0 H/s';
+    document.getElementById('hashrate-sub').textContent = hps > 0 ? fmt(hps) + ' raw' : 'No active miners';
+
+    // Blocks found
+    const bf = d.totals?.blocksFound || 0;
+    const blocksEl = document.getElementById('blocks-found');
+    blocksEl.textContent = bf;
+    blocksEl.className = 'card-value ' + (bf > 0 ? 'gold' : 'grey');
+    document.getElementById('card-blocks').className = 'card ' + (bf > 0 ? 'green' : '');
+    document.getElementById('expected-time').textContent = expectedBlockTime(hps, null);
+
+    // Shares
+    const sa = d.totals?.sharesAccepted || 0;
+    const ss = d.totals?.sharesSubmitted || 0;
+    const sr = d.totals?.sharesRejected || 0;
+    document.getElementById('shares-accepted').textContent = sa;
+    const pct = ss > 0 ? ((sa/ss)*100).toFixed(1) : '0';
+    document.getElementById('shares-sub').textContent = ss + ' submitted · ' + sr + ' rejected (' + pct + '% rate)';
+
+    // Block height
+    const bh = d.block?.height || 0;
+    if (bh !== lastBlockHeight && lastBlockHeight > 0) {
+      document.getElementById('block-height').style.color = '#f7a428';
+      setTimeout(() => document.getElementById('block-height').style.color = '', 1000);
+    }
+    lastBlockHeight = bh;
+    document.getElementById('block-height').textContent = bh ? bh.toLocaleString() : '—';
+    document.getElementById('block-sub').textContent = d.block?.epoch ? 'Epoch ' + parseInt(d.block.epoch, 16) : '—';
+
+    // Node status
+    const healthy = d.nodeHealthy;
+    document.getElementById('node-status').innerHTML =
+      '<span class="status-dot ' + (healthy ? 'dot-green' : 'dot-red') + '"></span>' +
+      (healthy ? 'Healthy' : 'Unreachable');
+    document.getElementById('uptime-sub').textContent = 'Uptime: ' + (d.uptime || '—');
+
+    // Miners
+    const mc = d.miners?.count || 0;
+    document.getElementById('miner-count').textContent = mc;
+    document.getElementById('miner-sub').textContent = mc === 1 ? '1 connected' : mc + ' connected';
+
+    // Miners table
+    const miners = d.miners?.list || [];
+    const tbody = document.getElementById('miners-table');
+    if (miners.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" style="color:#444;text-align:center">No miners connected</td></tr>';
+    } else {
+      tbody.innerHTML = miners.map(m => {
+        const workerName = m.worker?.split('.').pop() || m.worker || 'unknown';
+        const active = (m.hashrateHps || 0) > 0;
+        return `<tr>
+          <td><span class="status-dot ${active ? 'dot-green' : 'dot-grey'}"></span>${workerName}</td>
+          <td style="color:${active ? '#4caf50' : '#666'}">${active ? 'Mining' : 'Connected'}</td>
+          <td style="color:${active ? '#f7a428' : '#666'}">${m.hashrate || '0 H/s'}</td>
+          <td>${m.sharesSubmitted || 0}</td>
+          <td style="color:#4caf50">${m.sharesAccepted || 0}</td>
+          <td style="color:${(m.sharesRejected||0) > 0 ? '#f44336' : '#666'}">${m.sharesRejected || 0}</td>
+          <td style="color:#888">${(m.difficulty||0).toLocaleString()}</td>
+          <td style="color:#666">${formatUptime(m.uptimeSec)}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Pool info
+    document.getElementById('coinbase').textContent = d.coinbase || '—';
+    document.getElementById('work-id').textContent = d.block?.workId || '—';
+    document.getElementById('template-age').textContent =
+      d.templateAge !== undefined ? 'Template age: ' + d.templateAge + 's' : '—';
+
+  } catch(e) {
+    document.getElementById('conn-status').innerHTML =
+      '<span class="status-dot dot-red"></span>Disconnected · ' + new Date().toLocaleTimeString();
+    console.error('fetch error:', e);
+  }
+}
+
+update();
+setInterval(update, 5000);
+</script>
+</body>
+</html>

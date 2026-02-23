@@ -53,6 +53,7 @@ let poolExtranonce2Size = 0;
 let currentJob          = null;  // last mining.notify params
 let currentTarget       = null;  // last mining.set_target hex (LE 64 chars)
 let poolDifficulty      = null;  // from mining.set_difficulty
+let currentJobTime      = null;  // timestamp of last job update
 
 let minerIdCounter = 0;
 const miners = new Map();
@@ -61,6 +62,7 @@ const totals = {
   sharesSubmitted : 0,
   sharesAccepted  : 0,
   sharesRejected  : 0,
+  blocksFound     : 0,
   startTime       : Date.now(),
 };
 
@@ -243,8 +245,9 @@ function handleUpstreamMessage(line) {
         miner.pendingShares.delete(msg.id);
         if (msg.result === true) {
           totals.sharesAccepted++;
+          totals.blocksFound++;   // solo mode: accepted share = block found
           miner.sharesAccepted++;
-          log('SHARE', `✓ pool accepted from ${miner.worker}`);
+          log('SHARE', `✓ 🎉 BLOCK FOUND! pool accepted from ${miner.worker}`);
           sendToMiner(miner, { id: originalId, result: true, error: null });
         } else {
           totals.sharesRejected++;
@@ -261,6 +264,7 @@ function handleUpstreamMessage(line) {
   switch (msg.method) {
     case 'mining.notify':
       currentJob = msg.params;
+      currentJobTime = Date.now();
       log('POOL', `Job ${msg.params[0]} height=${msg.params[2]}`);
       broadcastToMiners({ id: null, method: 'mining.notify', params: currentJob });
       break;
@@ -490,11 +494,83 @@ function fmtUptime(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
   return `${h}h ${m}m ${s}s`;
 }
+function fmtHps(hps) {
+  if (!hps || hps === 0) return '0 H/s';
+  if (hps >= 1e12) return (hps/1e12).toFixed(2) + ' TH/s';
+  if (hps >= 1e9)  return (hps/1e9).toFixed(2) + ' GH/s';
+  if (hps >= 1e6)  return (hps/1e6).toFixed(2) + ' MH/s';
+  if (hps >= 1e3)  return (hps/1e3).toFixed(2) + ' KH/s';
+  return hps.toFixed(0) + ' H/s';
+}
 
 const statsServer = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, miners: miners.size, upstreamReady }));
+    return;
+  }
+
+  /* ── Dashboard HTML ── */
+  if (req.url === '/' || req.url === '/dashboard') {
+    const fs = require('fs');
+    const html = fs.readFileSync(__dirname + '/dashboard.html', 'utf8');
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(html);
+    return;
+  }
+
+  /* ── Dashboard stats endpoint (normalised format) ── */
+  if (req.url === '/proxy-stats') {
+    const uptime = Math.floor((Date.now() - totals.startTime) / 1000);
+    const h = Math.floor(uptime/3600), m = Math.floor((uptime%3600)/60);
+    const uptimeFmt = h + 'h ' + m + 'm ' + (uptime%60) + 's';
+
+    /* Aggregate hashrate across all miners */
+    let totalHps = 0;
+    const minerList = [...miners.values()].map(m => {
+      const hps = m.hashrate || 0;
+      totalHps += hps;
+      return {
+        id: m.id,
+        worker: m.worker,
+        address: m.socket?.remoteAddress,
+        uptimeSec: Math.floor((Date.now() - m.connectedAt) / 1000),
+        difficulty: +m.vardiff.currentDiff.toFixed(0),
+        sharesSubmitted: m.sharesSubmitted,
+        sharesAccepted: m.sharesAccepted,
+        sharesRejected: m.sharesRejected,
+        hashrate: fmtHps(hps),
+        hashrateHps: hps,
+      };
+    });
+
+    const data = {
+      node: `${UPSTREAM_HOST}:${UPSTREAM_PORT === 3001 ? '8114' : UPSTREAM_PORT}`,
+      nodeHealthy: upstreamReady,
+      coinbase: config.local?.coinbaseAddress || config.coinbaseAddress || '—',
+      status: upstreamReady ? 'active' : 'disconnected',
+      uptime: uptimeFmt,
+      templateAge: currentJob ? Math.floor((Date.now() - (currentJobTime||Date.now()))/1000) : null,
+      block: {
+        height: currentJob?.[2] ?? 0,
+        epoch: currentJob?.[6] ?? '0x0',
+        target: currentTarget ? currentTarget.slice(0,32)+'...' : null,
+        workId: currentJob?.[0] ?? null,
+      },
+      totals: {
+        blocksFound: totals.blocksFound || 0,
+        sharesSubmitted: totals.sharesSubmitted,
+        sharesAccepted: totals.sharesAccepted,
+        sharesRejected: totals.sharesRejected,
+        startTime: totals.startTime,
+      },
+      hashrate: fmtHps(totalHps),
+      hashrateHps: totalHps,
+      miners: { count: miners.size, list: minerList },
+    };
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify(data, null, 2));
     return;
   }
 
