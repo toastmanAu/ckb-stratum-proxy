@@ -3,242 +3,531 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CKB Solo Mining Dashboard</title>
+<title>CKB Solo Mining</title>
 <style>
+  :root {
+    --bg:      #0d0f14;
+    --surface: #161a22;
+    --border:  #252b38;
+    --accent:  #3bc67a;
+    --accent2: #4a9eff;
+    --warn:    #f5a623;
+    --danger:  #e74c3c;
+    --text:    #e2e8f0;
+    --muted:   #64748b;
+    --card-bg: #1a202e;
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0d0d0d; color: #e0e0e0; font-family: 'Courier New', monospace; padding: 20px; }
-  h1 { color: #f7a428; font-size: 1.4em; margin-bottom: 4px; letter-spacing: 2px; }
-  .subtitle { color: #666; font-size: 0.75em; margin-bottom: 20px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
-  .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 16px; }
-  .card.highlight { border-color: #f7a428; }
-  .card.green { border-color: #4caf50; }
-  .card.red { border-color: #f44336; }
-  .card-label { color: #888; font-size: 0.7em; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-  .card-value { font-size: 1.6em; color: #fff; font-weight: bold; }
-  .card-value.gold { color: #f7a428; }
-  .card-value.green { color: #4caf50; }
-  .card-value.red { color: #f44336; }
-  .card-value.grey { color: #666; }
-  .card-sub { font-size: 0.7em; color: #666; margin-top: 4px; }
-  .section-title { color: #888; font-size: 0.75em; text-transform: uppercase; letter-spacing: 2px; margin: 16px 0 8px; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px; }
-  table { width: 100%; border-collapse: collapse; background: #1a1a1a; border-radius: 6px; overflow: hidden; }
-  th { background: #222; color: #888; font-size: 0.7em; text-transform: uppercase; letter-spacing: 1px; padding: 10px 12px; text-align: left; }
-  td { padding: 10px 12px; border-top: 1px solid #222; font-size: 0.85em; }
-  tr:hover td { background: #222; }
-  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-  .dot-green { background: #4caf50; box-shadow: 0 0 6px #4caf50; }
-  .dot-red { background: #f44336; box-shadow: 0 0 6px #f44336; }
-  .dot-grey { background: #666; }
-  .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-  .last-update { color: #444; font-size: 0.7em; }
-  .progress-bar { background: #2a2a2a; border-radius: 3px; height: 4px; margin-top: 8px; overflow: hidden; }
-  .progress-fill { background: #f7a428; height: 100%; border-radius: 3px; transition: width 0.5s; }
-  .blocks-badge { display: inline-block; background: #f7a42820; border: 1px solid #f7a428; color: #f7a428; padding: 2px 8px; border-radius: 12px; font-size: 0.7em; margin-left: 8px; }
-  #conn-status { font-size: 0.7em; }
-  .expected-time { color: #666; font-size: 0.7em; margin-top: 4px; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 13px;
+    min-height: 100vh;
+  }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px; border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .header-left { display: flex; align-items: center; gap: 12px; }
+  .logo { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; color: var(--warn); }
+  .logo span { color: var(--text); }
+  .chain-badge {
+    background: #2e1f0a; color: var(--warn);
+    border: 1px solid var(--warn);
+    padding: 2px 10px; border-radius: 100px;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); display: inline-block;
+    margin-right: 6px;
+  }
+  .status-dot.ok    { background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse 2s infinite; }
+  .status-dot.error { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+  @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.5} }
+  .status-text { color: var(--muted); font-size: 12px; }
+
+  main { padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+  }
+  .stat-card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+    position: relative; overflow: hidden;
+  }
+  .stat-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: var(--accent); opacity: .5;
+  }
+  .stat-card.cw::before  { background: var(--warn); }
+  .stat-card.c2::before  { background: var(--accent2); }
+  .stat-card.cd::before  { background: var(--danger); }
+  .stat-card.cm::before  { background: var(--muted); }
+  .stat-card.cp::before  { background: #b44eff; }
+  .stat-label {
+    font-size: 10px; text-transform: uppercase;
+    letter-spacing: 1.2px; color: var(--muted); margin-bottom: 8px;
+  }
+  .stat-value {
+    font-size: 26px; font-weight: 700; color: var(--text);
+    line-height: 1; transition: color .3s;
+  }
+  .stat-value.flash { color: var(--warn) !important; }
+  .stat-sub { margin-top: 6px; font-size: 11px; color: var(--muted); }
+  .stat-value.sm { font-size: 16px; padding-top: 4px; word-break: break-all; }
+
+  /* Probability card */
+  .prob-card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px 24px;
+    position: relative; overflow: hidden;
+  }
+  .prob-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, var(--warn), var(--accent));
+  }
+  .prob-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 14px;
+  }
+  .prob-title {
+    font-size: 10px; text-transform: uppercase;
+    letter-spacing: 1.2px; color: var(--muted);
+  }
+  .prob-odds {
+    font-size: 22px; font-weight: 700; color: var(--warn);
+  }
+  .prob-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin-bottom: 14px;
+  }
+  .prob-item { }
+  .prob-item-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+  .prob-item-val   { font-size: 15px; font-weight: 600; color: var(--text); }
+  .prob-item-val.hi { color: var(--accent); }
+  .prob-item-val.lo { color: var(--muted); }
+
+  /* Luck bar */
+  .luck-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+  .luck-label { font-size: 10px; color: var(--muted); white-space: nowrap; }
+  .track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .fill  { height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: 3px; transition: width .8s ease; }
+
+  /* Panel / table */
+  .panel { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .panel-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .panel-title { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+  .panel-badge {
+    font-size: 10px; background: var(--border); color: var(--muted);
+    padding: 2px 8px; border-radius: 100px;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    background: var(--surface); color: var(--muted);
+    font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+    padding: 10px 16px; text-align: left; border-bottom: 1px solid var(--border);
+  }
+  td { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } .prob-grid { grid-template-columns: repeat(2,1fr); } }
 </style>
 </head>
 <body>
 
-<div class="header-row">
-  <div>
-    <h1>⛏ CKB SOLO MINING</h1>
-    <div class="subtitle">Nervos Network · Eaglesong · Solo Mode</div>
+<header>
+  <div class="header-left">
+    <div class="logo">⛏ <span>CKB</span> SOLO</div>
+    <div class="chain-badge">Eaglesong</div>
   </div>
-  <div id="conn-status" class="last-update">connecting...</div>
-</div>
+  <div class="status-text">
+    <span class="status-dot" id="conn-dot"></span>
+    <span id="conn-label">connecting...</span>
+  </div>
+</header>
 
-<div class="grid">
-  <div class="card highlight">
-    <div class="card-label">Hashrate</div>
-    <div class="card-value gold" id="hashrate">—</div>
-    <div class="card-sub" id="hashrate-sub">—</div>
-  </div>
-  <div class="card" id="card-blocks">
-    <div class="card-label">Blocks Found</div>
-    <div class="card-value" id="blocks-found">—</div>
-    <div class="card-sub" id="expected-time">—</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Shares Accepted</div>
-    <div class="card-value green" id="shares-accepted">—</div>
-    <div class="card-sub" id="shares-sub">—</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Block Height</div>
-    <div class="card-value" id="block-height">—</div>
-    <div class="card-sub" id="block-sub">—</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Node</div>
-    <div class="card-value" id="node-status" style="font-size:1em">—</div>
-    <div class="card-sub" id="uptime-sub">—</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Miners Online</div>
-    <div class="card-value" id="miner-count">—</div>
-    <div class="card-sub" id="miner-sub">—</div>
-  </div>
-</div>
+<main>
 
-<div class="section-title">Miners</div>
-<table>
-  <thead>
-    <tr>
-      <th>Worker</th>
-      <th>Status</th>
-      <th>Hashrate</th>
-      <th>Shares</th>
-      <th>Accepted</th>
-      <th>Rejected</th>
-      <th>Difficulty</th>
-      <th>Uptime</th>
-    </tr>
-  </thead>
-  <tbody id="miners-table">
-    <tr><td colspan="8" style="color:#444;text-align:center">Loading...</td></tr>
-  </tbody>
-</table>
+  <!-- Top stats row -->
+  <div class="stats-grid">
+    <div class="stat-card cw">
+      <div class="stat-label">Hashrate</div>
+      <div class="stat-value" id="hashrate" style="color:var(--warn)">—</div>
+      <div class="stat-sub" id="hashrate-sub">—</div>
+    </div>
+    <div class="stat-card" id="card-blocks">
+      <div class="stat-label">Blocks Found</div>
+      <div class="stat-value" id="blocks-found">—</div>
+      <div class="stat-sub" id="blocks-sub">All time</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Shares</div>
+      <div class="stat-value" id="shares-accepted" style="color:var(--accent)">—</div>
+      <div class="stat-sub" id="shares-sub">—</div>
+    </div>
+    <div class="stat-card c2">
+      <div class="stat-label">Block Height</div>
+      <div class="stat-value" id="block-height">—</div>
+      <div class="stat-sub" id="block-sub">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Node</div>
+      <div class="stat-value" id="node-status" style="font-size:14px">—</div>
+      <div class="stat-sub" id="uptime-sub">—</div>
+    </div>
+    <div class="stat-card cm">
+      <div class="stat-label">Miners Online</div>
+      <div class="stat-value" id="miner-count">—</div>
+      <div class="stat-sub" id="miner-sub">—</div>
+    </div>
+  </div>
 
-<div class="section-title">Pool Info</div>
-<div class="grid">
-  <div class="card">
-    <div class="card-label">Reward Address</div>
-    <div class="card-value" style="font-size:0.65em;word-break:break-all;color:#888" id="coinbase">—</div>
+  <!-- Solo block probability card -->
+  <div class="prob-card">
+    <div class="prob-header">
+      <div class="prob-title">⚡ Solo Block Probability</div>
+      <div class="prob-odds" id="prob-odds">—</div>
+    </div>
+    <div class="prob-grid">
+      <div class="prob-item">
+        <div class="prob-item-label">Network Hashrate</div>
+        <div class="prob-item-val" id="net-hashrate">—</div>
+      </div>
+      <div class="prob-item">
+        <div class="prob-item-label">Your Share</div>
+        <div class="prob-item-val" id="your-share">—</div>
+      </div>
+      <div class="prob-item">
+        <div class="prob-item-label">Expected Time</div>
+        <div class="prob-item-val" id="expected-time">—</div>
+      </div>
+      <div class="prob-item">
+        <div class="prob-item-label">Prob / Block</div>
+        <div class="prob-item-val" id="prob-per-block">—</div>
+      </div>
+      <div class="prob-item">
+        <div class="prob-item-label">Prob / Hour</div>
+        <div class="prob-item-val" id="prob-per-hour">—</div>
+      </div>
+      <div class="prob-item">
+        <div class="prob-item-label">Prob / Day</div>
+        <div class="prob-item-val" id="prob-per-day">—</div>
+      </div>
+      <div class="prob-item">
+        <div class="prob-item-label">Prob / Week</div>
+        <div class="prob-item-val" id="prob-per-week">—</div>
+      </div>
+      <div class="prob-item">
+        <div class="prob-item-label">Prob / Month</div>
+        <div class="prob-item-val" id="prob-per-month">—</div>
+      </div>
+    </div>
+    <div class="luck-row">
+      <div class="luck-label">Your share of network</div>
+      <div class="track"><div class="fill" id="share-bar" style="width:0%"></div></div>
+      <div class="luck-label" id="share-pct">0%</div>
+    </div>
   </div>
-  <div class="card">
-    <div class="card-label">Work ID</div>
-    <div class="card-value grey" id="work-id" style="font-size:1em">—</div>
-    <div class="card-sub" id="template-age">—</div>
+
+  <!-- Miners table -->
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-title">Connected Miners</div>
+      <div class="panel-badge" id="miner-badge">0 online</div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Worker</th>
+          <th>Status</th>
+          <th>Hashrate</th>
+          <th>Shares</th>
+          <th>Accepted</th>
+          <th>Rejected</th>
+          <th>Difficulty</th>
+          <th>Uptime</th>
+        </tr>
+      </thead>
+      <tbody id="miners-table">
+        <tr><td colspan="8" style="color:var(--muted);text-align:center;padding:20px">Loading...</td></tr>
+      </tbody>
+    </table>
   </div>
-</div>
+
+  <!-- Pool info -->
+  <div class="two-col">
+    <div class="stat-card cm">
+      <div class="stat-label">Reward Address</div>
+      <div class="stat-value sm" id="coinbase" style="color:var(--muted)">—</div>
+    </div>
+    <div class="stat-card cm">
+      <div class="stat-label">Work ID</div>
+      <div class="stat-value" id="work-id" style="color:var(--muted);font-size:18px">—</div>
+      <div class="stat-sub" id="template-age">—</div>
+    </div>
+  </div>
+
+</main>
 
 <script>
 const API = '/proxy-stats';
 let lastBlockHeight = 0;
-let blocksHistory = [];
 
-function fmt(n) {
-  if (n >= 1e12) return (n/1e12).toFixed(2) + ' TH/s';
-  if (n >= 1e9)  return (n/1e9).toFixed(2) + ' GH/s';
-  if (n >= 1e6)  return (n/1e6).toFixed(2) + ' MH/s';
-  if (n >= 1e3)  return (n/1e3).toFixed(2) + ' KH/s';
-  return n + ' H/s';
+/* ── Formatting ── */
+function fmtHash(hps) {
+  if (!hps || hps === 0) return '0 H/s';
+  if (hps >= 1e15) return (hps/1e15).toFixed(2) + ' PH/s';
+  if (hps >= 1e12) return (hps/1e12).toFixed(2) + ' TH/s';
+  if (hps >= 1e9)  return (hps/1e9).toFixed(2)  + ' GH/s';
+  if (hps >= 1e6)  return (hps/1e6).toFixed(2)  + ' MH/s';
+  if (hps >= 1e3)  return (hps/1e3).toFixed(2)  + ' KH/s';
+  return hps.toFixed(0) + ' H/s';
 }
 
-function formatUptime(sec) {
+function fmtUptime(sec) {
   if (!sec) return '—';
-  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-  if (h > 0) return h + 'h ' + m + 'm';
-  if (m > 0) return m + 'm ' + s + 's';
+  const h = Math.floor(sec / 3600), m = Math.floor((sec%3600)/60), s = sec%60;
+  if (h > 48) return Math.floor(h/24) + 'd ' + (h%24) + 'h';
+  if (h > 0)  return h + 'h ' + m + 'm';
+  if (m > 0)  return m + 'm ' + s + 's';
   return s + 's';
 }
 
-function expectedBlockTime(hashrateHps, networkTarget) {
-  // Approximate: difficulty = 2^256 / target (simplified)
-  // For display, just show rough estimate based on share rate
-  if (!hashrateHps || hashrateHps === 0) return 'Need hashrate to estimate';
-  // CKB network difficulty approx from compact target
-  // Very rough: at 1 MH/s solo, expected time is months/years
-  const hps = hashrateHps;
-  // Use a rough estimate: difficulty ~= 2^64 / hashrateHps seconds
-  // Actually estimate from share difficulty vs block difficulty is complex
-  // Show simple: "~X days at current hashrate" based on network stats
-  const netHashEst = 150e12; // ~150 TH/s rough CKB network
-  const yourShare = hps / netHashEst;
-  if (yourShare <= 0) return '—';
-  const blockEvery6s = 6;
-  const blocksPerDay = 86400 / blockEvery6s;
-  const expectedDays = 1 / (yourShare * blocksPerDay);
-  if (expectedDays < 1) return '~' + (expectedDays * 24).toFixed(1) + ' hours/block';
-  if (expectedDays < 365) return '~' + expectedDays.toFixed(0) + ' days/block';
-  return '~' + (expectedDays/365).toFixed(1) + ' years/block';
+function fmtDuration(seconds) {
+  if (!seconds || seconds <= 0) return '—';
+  if (seconds < 60)    return seconds.toFixed(0) + 's';
+  if (seconds < 3600)  return (seconds/60).toFixed(1) + ' min';
+  if (seconds < 86400) return (seconds/3600).toFixed(1) + ' hours';
+  if (seconds < 86400*365) return (seconds/86400).toFixed(1) + ' days';
+  return (seconds/86400/365).toFixed(1) + ' years';
 }
 
+function fmtPct(p) {
+  if (p <= 0) return '0%';
+  if (p >= 1) return '100%';
+  if (p >= 0.001) return (p * 100).toFixed(2) + '%';
+  if (p >= 0.000001) return (p * 100).toExponential(2) + '%';
+  return (p * 100).toExponential(2) + '%';
+}
+
+function fmtOdds(p) {
+  if (!p || p <= 0) return '—';
+  const odds = Math.round(1 / p);
+  if (odds < 1000) return '1 in ' + odds;
+  if (odds < 1e6)  return '1 in ' + (odds/1000).toFixed(1) + 'K';
+  if (odds < 1e9)  return '1 in ' + (odds/1e6).toFixed(1) + 'M';
+  return '1 in ' + (odds/1e9).toFixed(1) + 'B';
+}
+
+/* ── Network hashrate from compact_target ──
+ * CKB uses Bitcoin-style compact target (nBits).
+ * difficulty = genesis_target / current_target
+ * network_hashrate ≈ difficulty × 2^32 / block_time_seconds
+ *
+ * compact_target decode: exponent = top byte, mantissa = lower 3 bytes
+ * target = mantissa × 256^(exponent - 3)
+ * We work in BigInt to avoid float precision loss.
+ */
+function compactTargetToNetworkHashrate(compactHex, blockTimeSec = 6) {
+  try {
+    const compact = parseInt(compactHex, 16);
+    const exp      = (compact >> 24) & 0xff;
+    const mantissa = compact & 0x00ffffff;
+    if (mantissa === 0) return 0;
+
+    // target as BigInt: mantissa * 256^(exp-3)
+    let target = BigInt(mantissa);
+    const shift = exp - 3;
+    if (shift > 0)       target = target << BigInt(shift * 8);
+    else if (shift < 0)  target = target >> BigInt(-shift * 8);
+
+    // max_target = 2^256 - 1 (approximate as 2^256)
+    // difficulty = 2^256 / target  (use 2^224 / (target >> 32) to stay in safe range)
+    const max256 = BigInt(1) << BigInt(256);
+    const difficulty = max256 / target;
+
+    // network_hashrate = difficulty * 2^32 / block_time
+    // = (2^256 / target) * 2^32 / block_time
+    // Simplify: hashrate = 2^288 / (target * block_time)
+    const hashes = (BigInt(1) << BigInt(32)) * difficulty;
+    const hps = Number(hashes) / blockTimeSec;
+    return hps;
+  } catch(e) {
+    console.error('compact decode error', e);
+    return 0;
+  }
+}
+
+/* ── Probability maths ──
+ * p_per_block = your_hps / network_hps
+ * p_n_blocks  = 1 - (1 - p)^n   (at least one block in n attempts)
+ * blocks_per_period = period_sec / block_time_sec
+ */
+function blockProb(yourHps, netHps, blocks) {
+  if (!yourHps || !netHps || netHps === 0) return 0;
+  const p = yourHps / netHps;           // prob per single block
+  return 1 - Math.pow(1 - p, blocks);   // prob of at least 1 in n blocks
+}
+
+/* ── Main update ── */
 async function update() {
   try {
     const r = await fetch(API);
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
 
-    document.getElementById('conn-status').innerHTML =
-      '<span class="status-dot dot-green"></span>Live · ' + new Date().toLocaleTimeString();
+    document.getElementById('conn-dot').className   = 'status-dot ok';
+    document.getElementById('conn-label').textContent = 'Live · ' + new Date().toLocaleTimeString();
 
-    // Hashrate
+    /* Hashrate */
     const hps = d.hashrateHps || 0;
-    document.getElementById('hashrate').textContent = d.hashrate || '0 H/s';
-    document.getElementById('hashrate-sub').textContent = hps > 0 ? fmt(hps) + ' raw' : 'No active miners';
+    document.getElementById('hashrate').textContent     = d.hashrate || '0 H/s';
+    document.getElementById('hashrate-sub').textContent = hps > 0 ? 'Raw: ' + fmtHash(hps) : 'No active miners';
 
-    // Blocks found
+    /* Blocks found */
     const bf = d.totals?.blocksFound || 0;
-    const blocksEl = document.getElementById('blocks-found');
-    blocksEl.textContent = bf;
-    blocksEl.className = 'card-value ' + (bf > 0 ? 'gold' : 'grey');
-    document.getElementById('card-blocks').className = 'card ' + (bf > 0 ? 'green' : '');
-    document.getElementById('expected-time').textContent = expectedBlockTime(hps, null);
+    const bfEl = document.getElementById('blocks-found');
+    bfEl.textContent = bf;
+    bfEl.style.color = bf > 0 ? 'var(--warn)' : 'var(--muted)';
+    document.getElementById('card-blocks').querySelector('::before'); // trigger repaint
+    document.getElementById('card-blocks').className = 'stat-card ' + (bf > 0 ? 'cw' : 'cm');
 
-    // Shares
-    const sa = d.totals?.sharesAccepted || 0;
+    /* Shares */
+    const sa = d.totals?.sharesAccepted  || 0;
     const ss = d.totals?.sharesSubmitted || 0;
-    const sr = d.totals?.sharesRejected || 0;
+    const sr = d.totals?.sharesRejected  || 0;
     document.getElementById('shares-accepted').textContent = sa;
-    const pct = ss > 0 ? ((sa/ss)*100).toFixed(1) : '0';
-    document.getElementById('shares-sub').textContent = ss + ' submitted · ' + sr + ' rejected (' + pct + '% rate)';
+    const pct = ss > 0 ? ((sa/ss)*100).toFixed(1) : '0.0';
+    document.getElementById('shares-sub').textContent = ss + ' submitted · ' + sr + ' rejected · ' + pct + '% rate';
 
-    // Block height
+    /* Block height */
     const bh = d.block?.height || 0;
-    if (bh !== lastBlockHeight && lastBlockHeight > 0) {
-      document.getElementById('block-height').style.color = '#f7a428';
-      setTimeout(() => document.getElementById('block-height').style.color = '', 1000);
+    if (bh && bh !== lastBlockHeight && lastBlockHeight > 0) {
+      const el = document.getElementById('block-height');
+      el.classList.add('flash');
+      setTimeout(() => el.classList.remove('flash'), 800);
     }
     lastBlockHeight = bh;
     document.getElementById('block-height').textContent = bh ? bh.toLocaleString() : '—';
-    document.getElementById('block-sub').textContent = d.block?.epoch ? 'Epoch ' + parseInt(d.block.epoch, 16) : '—';
 
-    // Node status
+    /* Epoch from compact epoch string */
+    let epochNum = '—';
+    if (d.block?.epoch) {
+      try {
+        const ep = BigInt(d.block.epoch);
+        epochNum = 'Epoch ' + ((ep >> BigInt(32)) & BigInt(0xffffff)).toString();
+      } catch(e) { epochNum = d.block.epoch; }
+    }
+    document.getElementById('block-sub').textContent = epochNum;
+
+    /* Node */
     const healthy = d.nodeHealthy;
     document.getElementById('node-status').innerHTML =
-      '<span class="status-dot ' + (healthy ? 'dot-green' : 'dot-red') + '"></span>' +
-      (healthy ? 'Healthy' : 'Unreachable');
-    document.getElementById('uptime-sub').textContent = 'Uptime: ' + (d.uptime || '—');
+      `<span class="status-dot ${healthy ? 'ok' : 'error'}"></span>${healthy ? 'Healthy' : 'Down'}`;
+    document.getElementById('uptime-sub').textContent = 'Proxy up: ' + (d.uptime || '—');
 
-    // Miners
+    /* Miners online */
     const mc = d.miners?.count || 0;
     document.getElementById('miner-count').textContent = mc;
-    document.getElementById('miner-sub').textContent = mc === 1 ? '1 connected' : mc + ' connected';
+    document.getElementById('miner-sub').textContent   = mc === 1 ? '1 connected' : mc + ' connected';
+    document.getElementById('miner-badge').textContent = mc + ' online';
 
-    // Miners table
+    /* ── Probability calculation ── */
+    const compactTarget = d.block?.target;
+    const netHps = compactTarget ? compactTargetToNetworkHashrate(compactTarget) : 0;
+
+    document.getElementById('net-hashrate').textContent = netHps > 0 ? fmtHash(netHps) : '—';
+
+    if (hps > 0 && netHps > 0) {
+      const pPerBlock = hps / netHps;
+      const shareOf   = pPerBlock * 100;
+
+      const blocksPerHour  = 3600 / 6;
+      const blocksPerDay   = 86400 / 6;
+      const blocksPerWeek  = blocksPerDay * 7;
+      const blocksPerMonth = blocksPerDay * 30;
+
+      const pHour  = blockProb(hps, netHps, blocksPerHour);
+      const pDay   = blockProb(hps, netHps, blocksPerDay);
+      const pWeek  = blockProb(hps, netHps, blocksPerWeek);
+      const pMonth = blockProb(hps, netHps, blocksPerMonth);
+
+      const expectedSec = 6 / pPerBlock;
+
+      document.getElementById('your-share').textContent      = shareOf >= 0.001 ? shareOf.toFixed(4) + '%' : shareOf.toExponential(3) + '%';
+      document.getElementById('expected-time').textContent   = fmtDuration(expectedSec);
+      document.getElementById('prob-per-block').textContent  = fmtPct(pPerBlock);
+      document.getElementById('prob-per-hour').textContent   = fmtPct(pHour);
+      document.getElementById('prob-per-day').textContent    = fmtPct(pDay);
+      document.getElementById('prob-per-week').textContent   = fmtPct(pWeek);
+      document.getElementById('prob-per-month').textContent  = fmtPct(pMonth);
+      document.getElementById('prob-odds').textContent       = fmtOdds(pPerBlock);
+
+      /* Colour code based on expected time */
+      const etEl = document.getElementById('expected-time');
+      etEl.className = 'prob-item-val ' + (expectedSec < 86400*30 ? 'hi' : 'lo');
+
+      /* Share bar — log scale makes more sense visually */
+      const barPct = Math.min(100, shareOf * 1000); // 0.1% share = full bar
+      document.getElementById('share-bar').style.width = barPct + '%';
+      document.getElementById('share-pct').textContent = shareOf >= 0.01
+        ? shareOf.toFixed(3) + '%'
+        : shareOf.toExponential(2) + '%';
+    } else {
+      ['your-share','expected-time','prob-per-block','prob-per-hour',
+       'prob-per-day','prob-per-week','prob-per-month'].forEach(id => {
+        document.getElementById(id).textContent = '—';
+      });
+      document.getElementById('prob-odds').textContent = 'No hashrate';
+      document.getElementById('prob-odds').style.color = 'var(--muted)';
+    }
+
+    /* Miners table */
     const miners = d.miners?.list || [];
     const tbody = document.getElementById('miners-table');
-    if (miners.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" style="color:#444;text-align:center">No miners connected</td></tr>';
+    if (!miners.length) {
+      tbody.innerHTML = `<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:24px">No miners connected</td></tr>`;
     } else {
       tbody.innerHTML = miners.map(m => {
-        const workerName = m.worker?.split('.').pop() || m.worker || 'unknown';
+        const worker = m.worker?.split('.').pop() || m.worker || 'unknown';
         const active = (m.hashrateHps || 0) > 0;
+        const rjCol  = (m.sharesRejected||0) > 0 ? 'var(--danger)' : 'var(--muted)';
         return `<tr>
-          <td><span class="status-dot ${active ? 'dot-green' : 'dot-grey'}"></span>${workerName}</td>
-          <td style="color:${active ? '#4caf50' : '#666'}">${active ? 'Mining' : 'Connected'}</td>
-          <td style="color:${active ? '#f7a428' : '#666'}">${m.hashrate || '0 H/s'}</td>
+          <td><span class="status-dot ${active ? 'ok' : ''}" style="${active?'':'background:var(--muted)'}"></span>${worker}</td>
+          <td style="color:${active ? 'var(--accent)' : 'var(--muted)'}">${active ? 'Mining' : 'Idle'}</td>
+          <td style="color:${active ? 'var(--warn)' : 'var(--muted)'}">${m.hashrate || '0 H/s'}</td>
           <td>${m.sharesSubmitted || 0}</td>
-          <td style="color:#4caf50">${m.sharesAccepted || 0}</td>
-          <td style="color:${(m.sharesRejected||0) > 0 ? '#f44336' : '#666'}">${m.sharesRejected || 0}</td>
-          <td style="color:#888">${(m.difficulty||0).toLocaleString()}</td>
-          <td style="color:#666">${formatUptime(m.uptimeSec)}</td>
+          <td style="color:var(--accent)">${m.sharesAccepted || 0}</td>
+          <td style="color:${rjCol}">${m.sharesRejected || 0}</td>
+          <td style="color:var(--muted)">${(m.difficulty||0).toLocaleString(undefined,{maximumFractionDigits:0})}</td>
+          <td style="color:var(--muted)">${fmtUptime(m.uptimeSec)}</td>
         </tr>`;
       }).join('');
     }
 
-    // Pool info
-    document.getElementById('coinbase').textContent = d.coinbase || '—';
-    document.getElementById('work-id').textContent = d.block?.workId || '—';
-    document.getElementById('template-age').textContent =
-      d.templateAge !== undefined ? 'Template age: ' + d.templateAge + 's' : '—';
+    /* Pool info */
+    document.getElementById('coinbase').textContent     = d.coinbase || '—';
+    document.getElementById('work-id').textContent      = d.block?.workId || '—';
+    document.getElementById('template-age').textContent = d.templateAge !== undefined
+      ? 'Template age: ' + d.templateAge + 's' : '—';
 
   } catch(e) {
-    document.getElementById('conn-status').innerHTML =
-      '<span class="status-dot dot-red"></span>Disconnected · ' + new Date().toLocaleTimeString();
+    document.getElementById('conn-dot').className   = 'status-dot error';
+    document.getElementById('conn-label').textContent = 'Disconnected · ' + new Date().toLocaleTimeString();
     console.error('fetch error:', e);
   }
 }
