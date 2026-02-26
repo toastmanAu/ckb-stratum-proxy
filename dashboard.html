@@ -145,6 +145,40 @@
 
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } .prob-grid { grid-template-columns: repeat(2,1fr); } }
+
+  /* Earnings comparison */
+  .earnings-card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden;
+  }
+  .earnings-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 20px; border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .earnings-title { font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); }
+  .earnings-price { font-size: 11px; color: var(--muted); }
+  .earn-table { width: 100%; border-collapse: collapse; }
+  .earn-table th {
+    padding: 8px 16px; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 1px; color: var(--muted); border-bottom: 1px solid var(--border);
+    background: var(--surface); text-align: right;
+  }
+  .earn-table th:first-child { text-align: left; }
+  .earn-table td {
+    padding: 11px 16px; border-bottom: 1px solid var(--border);
+    font-size: 13px; text-align: right;
+  }
+  .earn-table td:first-child { text-align: left; font-weight: 600; }
+  .earn-table tr:last-child td { border-bottom: none; }
+  .earn-table tr:hover td { background: rgba(255,255,255,.02); }
+  .solo-col { color: var(--warn); }
+  .pool-col { color: var(--accent2); }
+  .win { color: var(--accent) !important; }
+  .note-bar {
+    padding: 8px 16px; font-size: 10px; color: var(--muted);
+    border-top: 1px solid var(--border); background: var(--surface);
+  }
 </style>
 </head>
 <body>
@@ -240,6 +274,33 @@
       <div class="luck-label">Your share of network</div>
       <div class="track"><div class="fill" id="share-bar" style="width:0%"></div></div>
       <div class="luck-label" id="share-pct">0%</div>
+    </div>
+  </div>
+
+  <!-- Earnings comparison -->
+  <div class="earnings-card">
+    <div class="earnings-header">
+      <div class="earnings-title">💰 Solo vs Pool — Expected Earnings</div>
+      <div class="earnings-price" id="ckb-price-label">CKB price: loading...</div>
+    </div>
+    <table class="earn-table">
+      <thead>
+        <tr>
+          <th>Period</th>
+          <th>Expected Shares</th>
+          <th class="solo-col">Solo (CKB)</th>
+          <th class="solo-col">Solo (USD)</th>
+          <th class="pool-col">Pool PPLNS (CKB)</th>
+          <th class="pool-col">Pool PPLNS (USD)</th>
+          <th>Better</th>
+        </tr>
+      </thead>
+      <tbody id="earnings-table">
+        <tr><td colspan="7" style="color:var(--muted);text-align:center;padding:20px">Waiting for hashrate...</td></tr>
+      </tbody>
+    </table>
+    <div class="note-bar" id="earnings-note">
+      Pool: ViaBTC · PPLNS · 2% fee · Block reward from live chain · CKB price from CoinGecko
     </div>
   </div>
 
@@ -496,6 +557,11 @@ async function update() {
       document.getElementById('prob-odds').style.color = 'var(--muted)';
     }
 
+    /* ── Earnings comparison ── */
+    const rewardCKB = await fetchBlockReward(bh);
+    const price     = await fetchCkbPrice();
+    renderEarningsTable(hps, netHps, rewardCKB, price, bh);
+
     /* Miners table */
     const miners = d.miners?.list || [];
     const tbody = document.getElementById('miners-table');
@@ -532,8 +598,133 @@ async function update() {
   }
 }
 
+/* ── CKB price from CoinGecko ── */
+let ckbPriceUsd = 0;
+let lastPriceFetch = 0;
+
+async function fetchCkbPrice() {
+  const now = Date.now();
+  if (now - lastPriceFetch < 120000 && ckbPriceUsd > 0) return ckbPriceUsd;
+  try {
+    const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=nervos-network&vs_currencies=usd');
+    if (!r.ok) return ckbPriceUsd;
+    const d = await r.json();
+    ckbPriceUsd = d?.['nervos-network']?.usd || 0;
+    lastPriceFetch = now;
+    if (ckbPriceUsd > 0)
+      document.getElementById('ckb-price-label').textContent = 'CKB: $' + ckbPriceUsd.toFixed(5) + ' USD';
+  } catch(e) { /* silent */ }
+  return ckbPriceUsd;
+}
+
+/* ── Block reward from live chain ── */
+let cachedBlockRewardCKB = 1007; // fallback from live sample
+let lastRewardFetch = 0;
+
+async function fetchBlockReward(height) {
+  const now = Date.now();
+  if (now - lastRewardFetch < 300000 && cachedBlockRewardCKB > 0) return cachedBlockRewardCKB;
+  try {
+    const blockHex = '0x' + Math.max(1, (height || 18700000) - 5).toString(16);
+    const r = await fetch('http://192.168.68.87:8114', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0',method:'get_block_by_number',params:[blockHex,null,null],id:1})
+    });
+    if (!r.ok) return cachedBlockRewardCKB;
+    const d = await r.json();
+    const txs = d?.result?.transactions || [];
+    if (txs.length) {
+      const cb = txs[0]; // cellbase is always first tx
+      const totalShannons = (cb.outputs || []).reduce((s, o) => s + parseInt(o.capacity, 16), 0);
+      if (totalShannons > 0) {
+        cachedBlockRewardCKB = totalShannons / 1e8;
+        lastRewardFetch = now;
+      }
+    }
+  } catch(e) { /* use cached fallback */ }
+  return cachedBlockRewardCKB;
+}
+
+/* ── Expected shares with pool in a period ──
+ * Pool share = hashrate / network_hashrate
+ * Expected CKB from pool in period = share × blocks_in_period × reward × (1 - fee)
+ * Expected CKB solo in period = same but variance is huge (expected value is identical,
+ * solo is just unsmoothed — the comparison is really about risk/smoothing)
+ * Pool fee = 2% (ViaBTC PPLNS)
+ */
+const POOL_FEE = 0.02;
+
+function earningsRow(label, blocks, yourHps, netHps, rewardCKB, pricUsd) {
+  if (!yourHps || !netHps || netHps === 0) return null;
+  const share = yourHps / netHps;
+  const expectedCKB = share * blocks * rewardCKB;          // solo expected value
+  const poolCKB     = expectedCKB * (1 - POOL_FEE);        // pool after fee
+
+  const soloCKBStr  = expectedCKB >= 0.001 ? expectedCKB.toFixed(4) : expectedCKB.toExponential(3);
+  const poolCKBStr  = poolCKB     >= 0.001 ? poolCKB.toFixed(4)     : poolCKB.toExponential(3);
+
+  const soloUSD     = pricUsd > 0 ? '$' + (expectedCKB * pricUsd).toFixed(4) : '—';
+  const poolUSD     = pricUsd > 0 ? '$' + (poolCKB     * pricUsd).toFixed(4) : '—';
+
+  // Expected shares submitted in period (based on miner diff)
+  // shares = period_sec / target_share_sec = approx blocks × block_time / targetShareSec
+  const period_sec = blocks * 6;
+  const approxShares = Math.round(period_sec / 30); // target 30s per share
+
+  // Solo is strictly worse in expected value (fee drag) but better variance at scale
+  // Solo wins only if you're large enough that fee drag matters more than variance smoothing
+  // For comparison: pool always wins on expected value; solo only wins if you find a block
+  const better = share > 0.01 ? 'Solo*' : 'Pool';
+  const betterTitle = share > 0.01 ? 'Large miner: fee drag matters' : 'Small miner: pool smoothing wins';
+
+  return { label, approxShares, soloCKBStr, soloUSD, poolCKBStr, poolUSD, better, betterTitle,
+           expectedCKB, poolCKB, share };
+}
+
+function renderEarningsTable(yourHps, netHps, rewardCKB, priceUsd, blockHeight) {
+  const periods = [
+    { label: '1 Hour',  blocks: 600    },
+    { label: '1 Day',   blocks: 14400  },
+    { label: '1 Week',  blocks: 100800 },
+    { label: '1 Month', blocks: 432000 },
+  ];
+
+  const rows = periods.map(p => earningsRow(p.label, p.blocks, yourHps, netHps, rewardCKB, priceUsd));
+  if (!rows[0]) {
+    document.getElementById('earnings-table').innerHTML =
+      `<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:20px">No hashrate — connect a miner to see earnings</td></tr>`;
+    return;
+  }
+
+  const share = yourHps / netHps;
+  const sharePct = (share * 100).toFixed(6) + '%';
+
+  document.getElementById('earnings-table').innerHTML = rows.map(row => {
+    if (!row) return '';
+    const soloWin = row.better === 'Solo*';
+    return `<tr>
+      <td>${row.label}</td>
+      <td style="color:var(--muted)">~${row.approxShares.toLocaleString()}</td>
+      <td class="solo-col${soloWin?' win':''}">${row.soloCKBStr} CKB</td>
+      <td class="solo-col${soloWin?' win':''}">${row.soloUSD}</td>
+      <td class="pool-col${!soloWin?' win':''}">${row.poolCKBStr} CKB</td>
+      <td class="pool-col${!soloWin?' win':''}">${row.poolUSD}</td>
+      <td title="${row.betterTitle}" style="color:${soloWin?'var(--warn)':'var(--accent2)'};font-size:11px">${row.better}</td>
+    </tr>`;
+  }).join('');
+
+  const note = `Pool: ViaBTC · PPLNS · 2% fee · Reward: ${rewardCKB.toFixed(2)} CKB/block · `+
+    `Your share: ${sharePct} · Price: ${priceUsd > 0 ? '$'+priceUsd.toFixed(5) : 'unavailable'} · `+
+    `*Solo wins only if hashrate >1% of network (fee drag > smoothing benefit)`;
+  document.getElementById('earnings-note').textContent = note;
+}
+
 update();
 setInterval(update, 5000);
+// Fetch price on load and every 2 minutes
+fetchCkbPrice();
+setInterval(fetchCkbPrice, 120000);
 </script>
 </body>
 </html>
