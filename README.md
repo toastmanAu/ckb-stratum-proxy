@@ -1,83 +1,102 @@
-# CKB Stratum Proxy
+# ckb-stratum-proxy
 
-A solo mining stratum proxy for [Nervos CKB](https://www.nervos.org/) (Eaglesong PoW).
+A Stratum v1 proxy for CKB (Nervos Network) mining. Connects upstream to a CKB pool and exposes a local Stratum server that any miner can point at.
 
-Connects directly to your local CKB full node — no pool involved. Any block found goes straight to the network and rewards go to your address.
+Handles ViaBTC's quirky 5-parameter `mining.notify` format and per-miner extranonce allocation.
 
-## Features
+---
 
-- **Solo mining** — direct to your CKB node via `get_block_template` / `submit_block`
-- **Multi-miner** — supports any stratum-compatible CKB miner (Goldshell CKBox, NerdMiner, etc.)
-- **Vardiff** — automatic difficulty adjustment per miner
-- **Goldshell compatible** — handles `mining.set_difficulty`, session resume, `mining.suggest_difficulty`
-- **NerdMiner compatible** — handles `mining.set_target`, `mining.suggest_target`
-- **Live stats** — HTTP stats API on port 8081 with hashrate estimation
-- **Stable** — systemd service, RPC timeouts, node health tracking, auto-restart
+## What it does
+
+- **Local Stratum server** on port 3333 — point any CKB miner here
+- **Pool relay** — forwards upstream pool jobs, handles auth, submits shares
+- **Per-miner extranonce** — 1-byte prefix per miner, non-overlapping nonce space (up to 256 concurrent miners)
+- **Stats HTTP** — port 8081, `GET /` returns JSON stats, `GET /health` for uptime check
+- **ViaBTC quirk handling** — mining.set_target and 5-param notify parsed correctly
+
+---
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/toastmanAu/ckb-stratum-proxy
 cd ckb-stratum-proxy
-npm install
 cp config.example.json config.json
-# Edit config.json with your node details and CKB address
-bash install.sh
+# Edit config.json — set pool address, port, worker name
+node proxy.js
 ```
 
-## Config
+Point your miner at `stratum+tcp://<this-machine-ip>:3333`.
+
+---
+
+## Configuration
 
 ```json
 {
-  "node": {
-    "host": "127.0.0.1",
-    "port": 8114,
-    "coinbase": "ckb1qyq..."
+  "pool": {
+    "host": "mining.viabtc.io",
+    "port": 3001,
+    "user": "YourWorkerName",
+    "pass": "x"
   },
   "local": {
-    "host": "0.0.0.0",
-    "port": 3333,
+    "stratumPort": 3333,
     "statsPort": 8081
-  },
-  "mode": "solo",
-  "vardiff": {
-    "targetShareSec": 30,
-    "initialDiff": 7000
   }
 }
 ```
 
-## Stats API
+`config.json` is gitignored — never committed.
 
-```
-GET http://localhost:8081/        — full stats JSON
-GET http://localhost:8081/health  — health check
-```
+---
 
-Returns hashrate, connected miners, accepted shares, blocks found.
+## Stats
 
-## Miner Setup
+```bash
+curl http://localhost:8081/
+# → JSON: connected miners, shares submitted, uptime, current job
 
-Point your miner at:
-```
-stratum+tcp://<your-pi-ip>:3333
+curl http://localhost:8081/health
+# → "OK" with 200 status
 ```
 
-Username: your CKB address  
-Password: `x`
+---
 
-## Requirements
+## Running as a service
 
-- Node.js 18+
-- CKB full node with `block_assembler` configured (see [CKB docs](https://github.com/nervosnetwork/ckb))
-- `--ba-advanced` flag on CKB node
+```bash
+cp proxy.service.example ~/.config/systemd/user/ckb-stratum.service
+systemctl --user enable --now ckb-stratum
+```
 
-## Tested Miners
+Or using the included start script:
+```bash
+bash start.sh
+```
 
-| Miner | Status |
-|-------|--------|
-| Goldshell CKBox | ✅ Working |
-| NerdMiner CKB (ESP32) | ✅ Working |
+---
+
+## Hardware tested
+
+- **NerdMiner CKB** (ESP32-2432S028R) — connects via WiFi, submits Eaglesong shares
+- Any Stratum v1 compatible CKB miner
+
+---
+
+## Architecture
+
+```
+CKB miners (NerdMiner, ASICs, etc.)
+    │  Stratum v1 TCP :3333
+    ▼
+ckb-stratum-proxy  (this)
+    │  Stratum v1 TCP → pool
+    ▼
+Pool (ViaBTC, F2Pool, etc.)
+```
+
+---
 
 ## License
 
