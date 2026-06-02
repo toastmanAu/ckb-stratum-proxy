@@ -254,7 +254,7 @@ function startWsSubscription() {
     }
     // Notification: { method: 'subscribe', params: { result, subscription } }
     if (msg.method === 'subscribe' && msg.params) {
-      // Trigger immediate template fetch; in-flight guard prevents pile-up.
+      log('WS  ', 'new_tip_header notification -> fetchTemplate()');
       fetchTemplate();
     }
   });
