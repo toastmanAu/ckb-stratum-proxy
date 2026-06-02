@@ -6,5 +6,8 @@
   "scripts": {
     "start": "node proxy.js"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
 }

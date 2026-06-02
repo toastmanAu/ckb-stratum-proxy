@@ -1,4 +1,4 @@
 config.json
-proxy.pid
-proxy.log
 node_modules/
+proxy.log
+proxy.pid

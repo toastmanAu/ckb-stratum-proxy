@@ -13,7 +13,9 @@
   "node": {
     "host": "127.0.0.1",
     "port": 8114,
-    "coinbase": "ckb1qyq..."
+    "coinbase": "ckb1qyq...",
+    "wsPort": 28114,
+    "pollMs": 250
   },
   "mode": "solo",
   "vardiff": {

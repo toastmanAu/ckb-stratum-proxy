@@ -29,6 +29,8 @@ try { config = require('./config.json'); } catch {
 
 const NODE_HOST  = config.node?.host     || '127.0.0.1';
 const NODE_PORT  = config.node?.port     || 8114;
+const NODE_WS_PORT = config.node?.wsPort  || 28114;
+const POLL_MS      = config.node?.pollMs  || 250;
 const COINBASE   = config.node?.coinbase || config.pool?.user || '';  // CKB address for rewards
 
 const LOCAL_HOST = config.local?.host      || '0.0.0.0';
@@ -158,7 +160,10 @@ function rpc(method, params) {
 // ── Block template polling ────────────────────────────────────────────────────
 let lastTemplateTime = 0;
 
+let fetchInFlight = false;
 async function fetchTemplate() {
+  if (fetchInFlight) return;
+  fetchInFlight = true;
   try {
     const tpl = await rpc('get_block_template', [null, null, null]);
 
@@ -199,11 +204,75 @@ async function fetchTemplate() {
     if (nodeHealthy) {
       log('NODE', `CKB node error: ${e.message}`);
       nodeHealthy = false;
-    } else if (nodeFailCount % 30 === 0) {
-      // Log every 60s (30 × 2s poll) to avoid log spam
-      log('NODE', `Still unreachable after ${nodeFailCount} attempts (${Math.round(nodeFailCount*2/60)}min)`);
+    } else if (nodeFailCount % 240 === 0) {
+      // Log every ~60s at 250ms poll cadence (240 × 250ms) to avoid log spam
+      log('NODE', `Still unreachable after ${nodeFailCount} attempts (${Math.round(nodeFailCount*0.25/60)}min)`);
     }
+  } finally {
+    fetchInFlight = false;
   }
+}
+
+// ── CKB new-tip-header WebSocket subscription ────────────────────────────────
+// Push-based template invalidation. CKB blocks every ~8s; with 250ms poll fallback
+// we'd still spend up to 250ms hashing stale work after each block. WS push cuts
+// that to ~5ms (LAN RTT + RPC fetch).
+const WebSocket = require('ws');
+let ws = null;
+let wsReconnectTimer = null;
+let wsBackoffMs = 1000;
+const WS_BACKOFF_MAX = 30000;
+
+function startWsSubscription() {
+  if (ws) return;
+  const url = `ws://${NODE_HOST}:${NODE_WS_PORT}/`;
+  let liveSub = false;
+
+  try { ws = new WebSocket(url); }
+  catch (e) { log('WS', `connect failed: ${e.message}`); scheduleWsReconnect(); return; }
+
+  ws.on('open', () => {
+    wsBackoffMs = 1000;  // reset backoff on successful connect
+    ws.send(JSON.stringify({
+      id: 1, jsonrpc: '2.0', method: 'subscribe', params: ['new_tip_header'],
+    }));
+  });
+
+  ws.on('message', (data) => {
+    let msg;
+    try { msg = JSON.parse(data); } catch { return; }
+    // Subscribe response: { id:1, result: <sub_id> }
+    if (msg.id === 1 && msg.result !== undefined) {
+      liveSub = true;
+      log('WS', `subscribed to new_tip_header (sub=${msg.result})`);
+      return;
+    }
+    // Subscribe error
+    if (msg.id === 1 && msg.error) {
+      log('WS', `subscribe error: ${JSON.stringify(msg.error)} — falling back to poll-only`);
+      return;
+    }
+    // Notification: { method: 'subscribe', params: { result, subscription } }
+    if (msg.method === 'subscribe' && msg.params) {
+      // Trigger immediate template fetch; in-flight guard prevents pile-up.
+      fetchTemplate();
+    }
+  });
+
+  ws.on('error', (e) => log('WS', `socket error: ${e.message}`));
+  ws.on('close', () => {
+    if (liveSub) log('WS', `disconnected — reconnecting in ${wsBackoffMs}ms`);
+    ws = null;
+    scheduleWsReconnect();
+  });
+}
+
+function scheduleWsReconnect() {
+  clearTimeout(wsReconnectTimer);
+  wsReconnectTimer = setTimeout(() => {
+    wsBackoffMs = Math.min(wsBackoffMs * 2, WS_BACKOFF_MAX);
+    startWsSubscription();
+  }, wsBackoffMs);
 }
 
 function templateToHeaderFields(tpl) {
@@ -223,8 +292,9 @@ function templateToHeaderFields(tpl) {
 
 function startPolling() {
   fetchTemplate();
-  // Poll every 2 seconds — CKB blocks are ~6s
-  pollTimer = setInterval(fetchTemplate, 2000);
+  // WS push primary; poll as low-latency safety net.
+  startWsSubscription();
+  pollTimer = setInterval(fetchTemplate, POLL_MS);
 
   // Watchdog: if we haven't gotten a new template in 5 minutes, log loudly
   setInterval(() => {
@@ -645,7 +715,8 @@ statsServer.listen(STATS_PORT, () => {
 });
 
 log('SOLO', '─── CKB Solo Mining Proxy ───');
-log('SOLO', `Node     : http://${NODE_HOST}:${NODE_PORT}`);
+log('SOLO', `Node     : http://${NODE_HOST}:${NODE_PORT} (poll=${POLL_MS}ms)`);
+log('SOLO', `Node WS  : ws://${NODE_HOST}:${NODE_WS_PORT}/ (new_tip_header subscribe)`);
 log('SOLO', `Coinbase : ${COINBASE || '(not set)'}`);
 log('SOLO', `Vardiff  : target=${VARDIFF.targetShareSec}s  retarget=${VARDIFF.retargetSec}s`);
 
