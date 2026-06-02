@@ -13,6 +13,8 @@ const http = require('http');
 const { ckbBlake2b }  = require('./blake2b.js');
 const { eaglesong }   = require('./eaglesong.js');
 const { computePowHash, serializeFullHeader, parseEpoch } = require('./ckb-header.js');
+const fs   = require('fs');
+const path = require('path');
 
 // ── Self-tests ────────────────────────────────────────────────────────────────
 require('./blake2b.js').selftest();
@@ -111,10 +113,14 @@ function bigIntToHexLE(n) {
 }
 
 function meetsTargetLE(hashBuf, targetHex) {
-  const t = Buffer.from(targetHex, 'hex');
-  for (let i = 31; i >= 0; i--) {
-    if (hashBuf[i] < t[i]) return true;
-    if (hashBuf[i] > t[i]) return false;
+  // hashBuf is the raw Eaglesong output: byte 0 is the high-order byte (CKB consensus uses
+  // U256::from_big_endian on this buffer). targetHex is stored LE per this proxy's convention.
+  // Compare hash[i] against the reversed target (LE -> BE) MSB-first.
+  const tLE = Buffer.from(targetHex, 'hex');
+  for (let i = 0; i < 32; i++) {
+    const tByte = tLE[31 - i];
+    if (hashBuf[i] < tByte) return true;
+    if (hashBuf[i] > tByte) return false;
   }
   return true;
 }
@@ -241,25 +247,44 @@ function startPolling() {
 // just need the nonce.
 
 function buildNotify(clean) {
+  // Legacy entry point — LE target on the wire (preserved for non-GodMiner miners).
   if (!currentTemplate) return null;
   return {
     id: null,
     method: 'mining.notify',
     params: [
-      currentJobId.toString(16),          // job_id
-      currentPowHash,                      // pow_hash (what miners hash against)
-      parseInt(currentTemplate.number, 16),// block height (int, ViaBTC style)
-      currentTargetLE,                     // network target (LE hex)
-      clean,                               // clean jobs
+      currentJobId.toString(16),
+      currentPowHash,
+      parseInt(currentTemplate.number, 16),
+      currentTargetLE,
+      clean,
+    ],
+  };
+}
+
+function buildNotifyFor(miner, clean) {
+  // Per-miner notify — K7/GodMiner needs BE-encoded target on the wire.
+  if (!currentTemplate) return null;
+  const target = miner._isGodMiner ? leToBe(currentTargetLE) : currentTargetLE;
+  return {
+    id: null,
+    method: 'mining.notify',
+    params: [
+      currentJobId.toString(16),
+      currentPowHash,
+      parseInt(currentTemplate.number, 16),
+      target,
+      clean,
     ],
   };
 }
 
 function broadcastJob(clean) {
-  const notify = buildNotify(clean);
-  if (!notify) return;
+  if (!currentTemplate) return;
   for (const [, miner] of miners) {
-    if (miner.authorized) sendToMiner(miner, notify);
+    if (!miner.authorized) continue;
+    const notify = buildNotifyFor(miner, clean);
+    if (notify) sendToMiner(miner, notify);
   }
 }
 
@@ -330,11 +355,19 @@ function checkVardiff(miner) {
   sendVardiff(miner);
 }
 
+function leToBe(hex) {
+  let be = ''; for (let i = hex.length - 2; i >= 0; i -= 2) be += hex.slice(i, i + 2);
+  return be;
+}
+
 function sendVardiff(miner) {
   const t = diffToTargetLE(miner.vardiff.currentDiff);
-  if (t) {
-    // Send both set_target (NerdMiner) and set_difficulty (Goldshell/intminer)
-    sendToMiner(miner, { id: null, method: 'mining.set_target', params: [t] });
+  if (!t) return;
+  // K7 (GodMiner) needs BE-encoded target; other miners get LE + set_difficulty for Goldshell compat.
+  if (miner._isGodMiner) {
+    sendToMiner(miner, { id: null, method: 'mining.set_target', params: [leToBe(t)] });
+  } else {
+    sendToMiner(miner, { id: null, method: 'mining.set_target',     params: [t] });
     sendToMiner(miner, { id: null, method: 'mining.set_difficulty', params: [miner.vardiff.currentDiff] });
   }
 }
@@ -352,19 +385,37 @@ function handleMinerMessage(miner, line) {
   switch (msg.method) {
 
     case 'mining.subscribe': {
-      // Echo back provided session ID for session-resume (Goldshell intminer sends it in params[1])
-      const sessionId = (msg.params && msg.params[1]) || Math.random().toString(16).slice(2, 10);
-      miner._sessionId = sessionId;
-      sendToMiner(miner, {
-        id: msg.id,
-        result: [
-          [['mining.set_difficulty', sessionId], ['mining.notify', sessionId]],
-          sessionId,
-          4,
-        ],
-        error: null,
-      });
-      log('MINE', `#${miner.id} subscribed (session=${sessionId})`);
+      const ua = (msg.params && msg.params[0]) || '';
+      const isGodMiner = /godminer|ckbminer/i.test(ua);
+      miner._isGodMiner = isGodMiner;
+
+      if (isGodMiner) {
+        // Bitmain K7 GodMiner / ckbminer-v1.0.0: extranonce1_bytes + extranonce2_size MUST sum to 16.
+        // Simple 3-tuple subscribe response (no nested subscription list).
+        miner._extranonce1 = '0011223344556677';
+        sendToMiner(miner, { id: msg.id, result: [null, miner._extranonce1, 8], error: null });
+        log('MINE', `#${miner.id} subscribed (ua=${ua}, K7-mode)`);
+
+        // K7 expects set_target + notify pushed at subscribe time AS WELL AS after auth.
+        if (currentTargetLE) sendVardiff(miner);
+        const subNotify = buildNotifyFor(miner, false);
+        if (subNotify) sendToMiner(miner, subNotify);
+      } else {
+        // Goldshell intminer / NerdMiner: nested 3-tuple with sessionId for session-resume.
+        const sessionId = (msg.params && msg.params[1]) || Math.random().toString(16).slice(2, 10);
+        miner._sessionId   = sessionId;
+        miner._extranonce1 = sessionId;
+        sendToMiner(miner, {
+          id: msg.id,
+          result: [
+            [['mining.set_difficulty', sessionId], ['mining.notify', sessionId]],
+            sessionId,
+            4,
+          ],
+          error: null,
+        });
+        log('MINE', `#${miner.id} subscribed (ua=${ua}, session=${sessionId})`);
+      }
       break;
     }
 
@@ -376,7 +427,7 @@ function handleMinerMessage(miner, line) {
 
       // Send current difficulty and job
       if (currentTargetLE) sendVardiff(miner);
-      const notify = buildNotify(false);
+      const notify = buildNotifyFor(miner, false);
       if (notify) sendToMiner(miner, notify);
       break;
     }
@@ -387,7 +438,10 @@ function handleMinerMessage(miner, line) {
       miner.vardiff.sharesInWindow++;
       checkVardiff(miner);
 
-      const [, jobId, , , nonce] = msg.params;
+      // GodMiner sends 3-field [worker, jobId, nonce]; Bitcoin-style miners send 5-field
+      // [worker, jobId, en2, ntime, nonce]. Read nonce as the LAST param either way.
+      const jobId = msg.params[1];
+      const nonce = msg.params[msg.params.length - 1];
       const jobIdInt = parseInt(jobId, 16);
 
       // If share is for an old job: ACK it (so miner stops replaying buffer)
@@ -406,8 +460,12 @@ function handleMinerMessage(miner, line) {
         return;
       }
 
-      // Validate nonce
-      const noncePadded = nonce.replace(/^0x/,'').padStart(32, '0');
+      // Build the full 16-byte nonce. Pre-K7: zero-pad the 8-byte miner-submitted nonce.
+      // K7 / GodMiner: full nonce = extranonce1 || miner's 8 bytes (extranonce1 stored on miner at subscribe).
+      const n8 = nonce.replace(/^0x/, '');
+      const noncePadded = miner._isGodMiner
+        ? (miner._extranonce1 || '0011223344556677') + n8
+        : n8.padStart(32, '0');
       const input       = Buffer.concat([Buffer.from(currentPowHash, 'hex'), Buffer.from(noncePadded, 'hex')]);
       const hash        = eaglesong(input);
 
@@ -504,6 +562,17 @@ const statsServer = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, miners: miners.size, hasTemplate: !!currentTemplate }));
+    return;
+  }
+  if (req.url === '/' || req.url === '/index.html') {
+    try {
+      const html = fs.readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch (e) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('dashboard.html not found');
+    }
     return;
   }
   const uptime = Math.floor((Date.now() - totals.startTime) / 1000);
