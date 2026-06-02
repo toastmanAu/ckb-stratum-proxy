@@ -1,32 +1,52 @@
 # ckb-stratum-proxy
 
-A Stratum v1 proxy for CKB (Nervos Network) mining. Connects upstream to a CKB pool and exposes a local Stratum server that any miner can point at.
+A Stratum v1 proxy for CKB (Nervos Network) mining. Ships **two** Node.js servers:
 
-Handles ViaBTC's quirky 5-parameter `mining.notify` format and per-miner extranonce allocation.
+- **`proxy.js`** — pool-relay mode. Forwards upstream pool jobs and submits shares for many local miners over a single upstream connection.
+- **`solo-proxy.js`** — direct-to-node solo mode. Pulls block templates from a CKB node you control via `get_block_template`, hands out work to miners as Stratum jobs, and submits any found block straight to the node via `submit_block`. No pool involved.
 
----
-
-## What it does
-
-- **Local Stratum server** on port 3333 — point any CKB miner here
-- **Pool relay** — forwards upstream pool jobs, handles auth, submits shares
-- **Per-miner extranonce** — 1-byte prefix per miner, non-overlapping nonce space (up to 256 concurrent miners)
-- **Stats HTTP** — port 8081, `GET /` returns JSON stats, `GET /health` for uptime check
-- **ViaBTC quirk handling** — mining.set_target and 5-param notify parsed correctly
+Includes a self-contained cyberpunk **live dashboard** at `http://<host>:8081/` for either mode.
 
 ---
 
-## Quick Start
+## What works today
+
+| Miner | Mode | Notes |
+|---|---|---|
+| **Bitmain Antminer K7** (GodMiner/2.0.1) | solo + pool | Validated 2026-06-02 against `solo-proxy.js` at ~67 TH/s, sustained share flow with 0% rejects |
+| **Goldshell intminer** (Goldshell K7-series firmware) | solo + pool | Session-resume + nested-subscribe + `set_difficulty` path |
+| **NerdMiner CKB** (ESP32) | solo + pool | Simple Eaglesong miner; uses LE target wire format |
+| Any Stratum v1 CKB miner | both | Best effort — open an issue if your firmware needs a tweak |
+
+The proxy auto-detects K7 / GodMiner via the `mining.subscribe` user-agent and switches subscribe format, target endianness, and nonce assembly accordingly. Other miners use the original code path. See `solo-proxy.js` `case 'mining.subscribe'` for the branch.
+
+---
+
+## Quick start — pool relay (forward to ViaBTC / F2Pool / etc.)
 
 ```bash
 git clone https://github.com/toastmanAu/ckb-stratum-proxy
 cd ckb-stratum-proxy
 cp config.example.json config.json
-# Edit config.json — set pool address, port, worker name
+# Edit config.json — set pool host/port/user
 node proxy.js
 ```
 
-Point your miner at `stratum+tcp://<this-machine-ip>:3333`.
+Point your miner at `stratum+tcp://<host-ip>:3333`. Worker username is forwarded to the pool.
+
+## Quick start — solo (direct to your own CKB node)
+
+```bash
+git clone https://github.com/toastmanAu/ckb-stratum-proxy
+cd ckb-stratum-proxy
+cp config.example.json config.json
+# Edit config.json — point "node" at your local CKB RPC + your payout address
+node solo-proxy.js
+```
+
+The proxy repeatedly calls `get_block_template` on your node, hands the templates out as Stratum jobs, and calls `submit_block` if any miner finds a network-difficulty hash. Block rewards go to whatever address your node's `block_assembler` is configured for.
+
+Point your miner at `stratum+tcp://<host-ip>:3333` exactly as for pool mode.
 
 ---
 
@@ -37,165 +57,130 @@ Point your miner at `stratum+tcp://<this-machine-ip>:3333`.
   "pool": {
     "host": "mining.viabtc.io",
     "port": 3001,
-    "user": "YourWorkerName",
+    "user": "ckb1q...YOUR_ADDRESS.WorkerName",
     "pass": "x"
   },
+  "node": {
+    "host": "127.0.0.1",
+    "port": 8114,
+    "coinbase": "ckb1q...YOUR_ADDRESS"
+  },
   "local": {
-    "stratumPort": 3333,
+    "host": "0.0.0.0",
+    "port": 3333,
     "statsPort": 8081
+  },
+  "vardiff": {
+    "targetShareSec": 30,
+    "retargetSec": 60,
+    "variancePercent": 30,
+    "minDiff": 0.001,
+    "maxDiff": 1000000000,
+    "initialDiff": null
   }
 }
 ```
 
-`config.json` is gitignored — never committed.
+- `pool` — required for `proxy.js`, ignored by `solo-proxy.js`
+- `node` — required for `solo-proxy.js`, ignored by `proxy.js`
+- `vardiff.initialDiff` — `null` lets vardiff start at 1.0 (network difficulty). For low-hashrate miners or quick share visibility, set lower (e.g. `0.0001`). Vardiff will retarget toward `targetShareSec` (default 30 s) automatically.
+- `config.json` is `.gitignore`d — never committed.
 
 ---
 
-## Stats
+## Live dashboard
 
-```bash
-curl http://localhost:8081/
-# → JSON: connected miners, shares submitted, uptime, current job
+`http://<host>:8081/` — single self-contained HTML page, no external dependencies, polls `/api/stats` every 2 s.
 
-curl http://localhost:8081/health
-# → "OK" with 200 status
-```
+Shows:
+- node tip height + epoch + work ID
+- connected miners (worker, IP, difficulty, accepted/rejected counts)
+- session uptime, total submitted/accepted/rejected, blocks found
+- cumulative-shares sparkline + chain-tip drift sparkline
+- accept-rate %, share rate per minute
+
+Empty miners list renders a radar sweep so the proxy visibly "looks alive" before any miner connects.
+
+## HTTP endpoints
+
+| Path | Returns |
+|---|---|
+| `GET /` | dashboard HTML |
+| `GET /api/stats` | live JSON: node, uptime, current job, miners list, share totals |
+| `GET /health` | minimal `{ok, miners, hasTemplate}` JSON for probes |
 
 ---
 
 ## Running as a service
 
 ```bash
+# user-level systemd
 cp proxy.service.example ~/.config/systemd/user/ckb-stratum.service
 systemctl --user enable --now ckb-stratum
-```
 
-Or using the included start script:
-```bash
+# or detached background
 bash start.sh
 ```
 
----
-
-## Hardware tested
-
-- **NerdMiner CKB** (ESP32-2432S028R) — connects via WiFi, submits Eaglesong shares
-- Any Stratum v1 compatible CKB miner
+See `install.sh` for a one-shot installer.
 
 ---
 
-## Solo Mining (Direct to Your Own Node)
+## Solo mining notes
 
-> Mine directly to a CKB full node you control. All block rewards go to your address — no pool fees, no middleman.
+### Block-find probability
 
-### Prerequisites
+At CKB mainnet difficulty (~100 PH/s network as of mid-2026):
 
-- A synced CKB full node (mainnet or testnet)
-- `ckb-miner` binary (ships with the CKB release package)
-- Your CKB reward address
+| Your hashrate | Expected time per block |
+|---|---|
+| 1 TH/s (NerdMiner cluster) | ~9 days |
+| 7 TH/s (K7 underclocked) | ~32 hours |
+| 67 TH/s (K7 spec) | ~3.3 hours |
+| 1 PH/s | ~13 minutes |
 
-### Step 1 — Configure your CKB node for mining
+Variance is enormous — one block ≈ 30 minutes of expected future hashrate, so an early-luck block well within the first 10 % of expected time is normal statistical behavior.
 
-In your node's `ckb.toml`, set your reward address:
+### Pool relay vs solo
 
-```toml
-[block_assembler]
-code_hash = "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8"
-hash_type = "type"
-args      = "0xYOUR_LOCK_ARGS_HERE"   # 20-byte lock args from your CKB address
-message   = "0x"
-```
-
-To get your lock args:
-```bash
-ckb-cli util address-info --address ckb1q...youraddress
-# Look for "args" in the lock script section
-```
-
-Restart your node after editing.
-
-### Step 2 — Configure ckb-miner
-
-In `ckb-miner.toml` (in your node directory):
-
-```toml
-[miner.client]
-rpc_url     = "http://127.0.0.1:8114"   # your node's RPC
-poll_interval = 1000                     # ms between job polls
-
-[[miner.workers]]
-worker_type  = "Dummy"
-delay_type   = "Constant"
-value        = 0
-```
-
-> `ckb-miner` uses the node's `get_block_template` RPC — no Stratum needed for CPU mining.
-
-Start it:
-```bash
-ckb miner -C /path/to/your/ckb/dir
-```
-
-### Step 3 — Point Stratum miners at the proxy (optional)
-
-If you have Stratum hardware (NerdMiner, ASICs) and want them pointing at your own node instead of a pool, you need a Stratum → `get_block_template` bridge. The recommended option is [ckb-solo-miner](https://github.com/nervosnetwork/ckb-miner) or run this proxy pointed at a self-hosted pool like [ckpool](https://bitbucket.org/ckolivas/ckpool).
-
-For **NerdMiner / ESP32 direct solo** via this proxy:
-
-```json
-{
-  "pool": {
-    "host": "127.0.0.1",
-    "port": 3333,
-    "user": "ckb1q...youraddress.worker1",
-    "pass": "x"
-  }
-}
-```
-
-Then point the proxy upstream at your own Stratum bridge on the node machine.
-
-### Architecture comparison
-
-**Pool mining (default):**
-```
-Miner → ckb-stratum-proxy → Pool (ViaBTC, F2Pool…) → CKB network
-```
-
-**Solo mining via ckb-miner (simplest):**
-```
-ckb-miner → CKB node (get_block_template) → CKB network
-```
-
-**Solo mining with Stratum hardware:**
-```
-NerdMiner / ASIC → ckb-stratum-proxy → Stratum bridge → CKB node → CKB network
-```
-
-### Reward address
-
-Your lock args come from your CKB address. Quick way to find them:
-
-```bash
-# If you have ckb-cli:
-ckb-cli util address-info --address ckb1q...
-
-# Or decode manually — the last 20 bytes of the bech32 payload are your args
-```
+| | Pool | Solo |
+|---|---|---|
+| Reward smoothing | yes (proportional shares) | no (lottery — full block reward or nothing) |
+| Pool fee | typical 1-2% | 0% |
+| Stratum complexity | one upstream, many downstream | proxy generates jobs from local node |
+| Failure mode | upstream pool down → miners idle | local node down → miners idle |
+| Best for | <10% of network hashrate | 1%+ of network hashrate, or "verify my hardware works" runs |
 
 ---
 
 ## Architecture
 
+**Pool relay (`proxy.js`):**
 ```
-CKB miners (NerdMiner, ASICs, etc.)
-    │  Stratum v1 TCP :3333
-    ▼
-ckb-stratum-proxy  (this)
-    │  Stratum v1 TCP → pool
-    ▼
-Pool (ViaBTC, F2Pool, etc.)
+Miners (Stratum)  →  ckb-stratum-proxy  →  Pool  →  CKB network
+       :3333                                upstream
 ```
+
+**Solo (`solo-proxy.js`):**
+```
+Miners (Stratum)  →  ckb-stratum-proxy  ↔  Your CKB node  →  CKB network
+       :3333                              get_block_template / submit_block
+```
+
+---
+
+## Protocol notes — why two miner code paths?
+
+K7's GodMiner firmware enforces several invariants that NerdMiner / Goldshell don't:
+
+- `extranonce1_bytes + extranonce2_size` **must equal 16 bytes**. K7 logs `n1size N, n2size M, n1size + n2size != 16, in parse_extranonce` and refuses to authorize otherwise.
+- `mining.set_target` and `mining.notify` target hex must be **big-endian** on the wire. Other miners accept the original LE encoding.
+- `mining.subscribe` response must be a simple 3-tuple `[null, extranonce1, en2_size]` — K7 closes the socket on Bitcoin's nested `[[subs], session, en2_size]` format.
+- `mining.submit` is a 3-field `[worker, jobId, nonce]` — Bitcoin's 5-field `[worker, jobId, en2, ntime, nonce]` causes a naive destructure to read `nonce = undefined`.
+- Full 16-byte Eaglesong nonce = `extranonce1 (server-assigned) || miner's 8-byte submitted nonce`. K7 zero-pads internally if extranonce1 < 8 bytes.
+- CKB consensus interprets the Eaglesong hash as **big-endian** (`U256::from_big_endian`). Earlier versions of this proxy compared LE — which silently rejected real shares. Fixed for all miners.
+
+The proxy detects GodMiner / ckbminer via the subscribe user-agent and branches accordingly. Adding support for another strict miner is one branch.
 
 ---
 
