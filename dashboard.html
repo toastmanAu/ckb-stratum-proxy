@@ -170,9 +170,11 @@
       <div class="sub">EPOCH <span id="m-epoch" class="hash">—</span></div>
     </div>
     <div class="card s3 mag"><span class="corner"></span>
-      <div class="label"><span>BLOCKS FOUND</span><span class="tag">⬢</span></div>
-      <div class="val" id="m-blocks">0</div>
-      <div class="sub">Solo · since session start</div>
+      <div class="label"><span>HASHRATE</span><span class="tag">⟦Σ⟧</span></div>
+      <div class="val" id="m-hashrate">— H/s</div>
+      <div class="sub">
+        <span id="m-blocks-inline">0</span> blocks found · <b id="m-miners-inline" style="color:var(--magenta)">0</b> rigs
+      </div>
     </div>
     <div class="card s3 mag"><span class="corner"></span>
       <div class="label"><span>MINERS</span><span class="tag">RIG</span></div>
@@ -319,24 +321,26 @@
     }
     const rows = list.map(m => {
       const id     = m.id ?? m.workerId ?? m.worker ?? m.address ?? '—';
-      const addr   = m.remote ?? m.ip ?? m.peer ?? '—';
+      const addr   = m.address ?? m.remote ?? m.ip ?? m.peer ?? '—';
       const ua     = m.userAgent ?? m.agent ?? '—';
       const acc    = m.sharesAccepted ?? m.accepted ?? 0;
       const rej    = m.sharesRejected ?? m.rejected ?? 0;
       const diff   = m.difficulty ?? m.diff ?? '—';
+      const hash   = m.hashrate ?? '— H/s';
       const last   = m.lastShare ?? m.lastSeen ?? m.last ?? null;
       const lastTxt= last ? new Date(last).toLocaleTimeString() : '—';
       return `<tr>
         <td><span class="led" style="display:inline-block;vertical-align:middle;margin-right:8px"></span><b>${trunc(String(id),24)}</b></td>
         <td class="mono">${addr}</td>
         <td>${ua}</td>
+        <td><b style="color:var(--magenta);text-shadow:var(--shadow-mag)">${hash}</b></td>
         <td>${diff}</td>
         <td><span style="color:var(--lime)">${fmt(acc)}</span> / <span style="color:var(--red)">${fmt(rej)}</span></td>
         <td>${lastTxt}</td>
       </tr>`;
     }).join('');
     mount.innerHTML = `<table>
-      <thead><tr><th>WORKER</th><th>REMOTE</th><th>AGENT</th><th>DIFF</th><th>ACC / REJ</th><th>LAST SHARE</th></tr></thead>
+      <thead><tr><th>WORKER</th><th>REMOTE</th><th>AGENT</th><th>HASHRATE</th><th>DIFF</th><th>ACC / REJ</th><th>LAST SHARE</th></tr></thead>
       <tbody>${rows}</tbody></table>`;
   }
 
@@ -380,11 +384,13 @@
     $('m-acc').textContent     = fmt(acc);
     $('m-rej').textContent     = fmt(rej);
     $('m-rate').textContent    = sub ? ((acc / sub) * 100).toFixed(1) + '%' : '—';
-    $('m-blocks').textContent  = fmt(t.blocksFound ?? 0);
+    $('m-blocks-inline').textContent = fmt(t.blocksFound ?? 0);
+    $('m-hashrate').textContent = data.hashrate ?? '— H/s';
 
     // Miners
     const ml = data.miners?.list ?? [];
     $('m-miners').textContent  = data.miners?.count ?? ml.length ?? 0;
+    $('m-miners-inline').textContent = data.miners?.count ?? ml.length ?? 0;
     $('m-miners-sub').textContent = ml.length ? 'Active stratum sessions' : 'Awaiting handshake…';
     renderMiners(ml);
 

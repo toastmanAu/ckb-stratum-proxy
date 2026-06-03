@@ -62,6 +62,7 @@ const totals = {
   sharesSubmitted: 0,
   sharesAccepted : 0,
   sharesRejected : 0,
+  totalShareWork : 0,   // Σ (diff × 2^32) over all accepted shares — time-weighted hash work
   startTime      : Date.now(),
 };
 
@@ -517,10 +518,13 @@ function handleMinerMessage(miner, line) {
       // If share is for an old job: ACK it (so miner stops replaying buffer)
       // but don't actually validate/submit — the work is stale
       if (jobIdInt !== currentJobId) {
+        const work = miner.vardiff.currentDiff * 4294967296;
         totals.sharesSubmitted++;
         totals.sharesAccepted++;
+        totals.totalShareWork += work;
         miner.sharesSubmitted++;
         miner.sharesAccepted++;
+        miner.totalShareWork += work;
         sendToMiner(miner, { id: msg.id, result: true, error: null });
         return;
       }
@@ -549,8 +553,11 @@ function handleMinerMessage(miner, line) {
         return;
       }
 
+      const work = miner.vardiff.currentDiff * 4294967296;
       totals.sharesAccepted++;
+      totals.totalShareWork += work;
       miner.sharesAccepted++;
+      miner.totalShareWork += work;
       log('MINE', `#${miner.id} share accepted (${miner.worker})`);
       sendToMiner(miner, { id: msg.id, result: true, error: null });
 
@@ -572,9 +579,34 @@ function handleMinerMessage(miner, line) {
       sendToMiner(miner, { id: msg.id, result: true, error: null });
       break;
 
-    case 'mining.suggest_difficulty':
+    case 'mining.suggest_difficulty': {
+      // Honor the miner's hint — ASICs (K7/GodMiner) know their hashrate and want
+      // a sensible starting diff. Toy miners (ESP32, CPU) usually don't send this,
+      // so they keep config.initialDiff. Clamp to [minDiff, maxDiff] for safety.
+      const suggested = Number(msg.params?.[0]);
+      if (Number.isFinite(suggested) && suggested > 0) {
+        const clamped = Math.min(Math.max(suggested, VARDIFF.minDiff), VARDIFF.maxDiff);
+        const before  = miner.vardiff.currentDiff;
+        const now     = Date.now();
+        miner.vardiff.currentDiff    = clamped;
+        miner.vardiff.windowStart    = now;
+        miner.vardiff.sharesInWindow = 0;
+        miner.vardiff.lastRetarget   = now;
+        log('VDIF', `#${miner.id} suggest_difficulty: ${before} → ${clamped} (raw=${suggested})`);
+        if (currentTargetLE) {
+          sendVardiff(miner);
+          const notify = buildNotifyFor(miner, false);
+          if (notify) sendToMiner(miner, notify);
+        }
+      } else {
+        log('MINE', `#${miner.id} suggest_difficulty ignored (invalid params: ${JSON.stringify(msg.params)})`);
+      }
+      sendToMiner(miner, { id: msg.id, result: true, error: null });
+      break;
+    }
+
     case 'mining.suggest_target':
-      // Acknowledge but let vardiff control the actual difficulty
+      // Target → diff conversion not implemented; ack only.
       sendToMiner(miner, { id: msg.id, result: true, error: null });
       break;
 
@@ -589,6 +621,7 @@ const minerServer = net.createServer(socket => {
   const miner = {
     id, socket, authorized: false, worker: 'unknown', buf: '',
     sharesSubmitted: 0, sharesAccepted: 0, sharesRejected: 0,
+    totalShareWork: 0,   // Σ (diff × 2^32) — time-weighted, ramp-correct
     connectedAt: now,
     vardiff: {
       currentDiff: VARDIFF.initialDiff,
@@ -658,9 +691,10 @@ const statsServer = http.createServer((req, res) => {
   }
 
   const minerList = [...miners.values()].map(m => {
-    const uptimeSec    = Math.max(1, Math.floor((Date.now() - m.connectedAt) / 1000));
-    const sharesPerSec = m.sharesAccepted / uptimeSec;
-    const hashrateHps  = sharesPerSec * m.vardiff.currentDiff * Math.pow(2, 32);
+    const uptimeSec   = Math.max(1, Math.floor((Date.now() - m.connectedAt) / 1000));
+    // Time-weighted: each share contributes (diff × 2^32) hashes at the diff
+    // it was accepted at. Correct during vardiff ramps; converges from share #1.
+    const hashrateHps = (m.totalShareWork || 0) / uptimeSec;
     return {
       id: m.id, worker: m.worker,
       address: m.socket?.remoteAddress,
