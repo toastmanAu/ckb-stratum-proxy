@@ -172,9 +172,7 @@
     <div class="card s3 mag"><span class="corner"></span>
       <div class="label"><span>HASHRATE</span><span class="tag">⟦Σ⟧</span></div>
       <div class="val" id="m-hashrate">— H/s</div>
-      <div class="sub">
-        <span id="m-blocks-inline">0</span> blocks found · <b id="m-miners-inline" style="color:var(--magenta)">0</b> rigs
-      </div>
+      <div class="sub"><b id="m-miners-inline" style="color:var(--magenta)">0</b> rigs · solo mode</div>
     </div>
     <div class="card s3 mag"><span class="corner"></span>
       <div class="label"><span>MINERS</span><span class="tag">RIG</span></div>
@@ -190,7 +188,8 @@
         <div class="sub">
           <span class="good" id="m-acc">0</span> accepted ·
           <span class="bad" id="m-rej">0</span> rejected ·
-          accept rate <b id="m-rate" style="color:var(--lime)">—</b>
+          accept rate <b id="m-rate" style="color:var(--lime)">—</b> ·
+          <span style="color:var(--magenta)">⬢</span> <b id="m-blocks-inline" style="color:var(--magenta)">0</b> found
         </div>
       </div>
       <svg class="spark" id="spark-shares" viewBox="0 0 600 60" preserveAspectRatio="none">
@@ -229,6 +228,53 @@
         <circle class="dot mag" cx="0" cy="0" r="2.5"/>
       </svg>
       <div class="ticker"><span class="blip"></span> HEIGHT Δ TRACE · stepwise per new block</div>
+    </div>
+
+    <!-- Solo block ETA (Poisson) -->
+    <div class="card s12 mag"><span class="corner"></span>
+      <div class="label"><span>SOLO BLOCK ETA</span><span class="tag">⟁ POISSON</span></div>
+      <div style="display:flex;align-items:baseline;gap:24px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:10px;letter-spacing:.24em;color:var(--ink-dim);text-transform:uppercase;margin-bottom:4px">MEAN ETA</div>
+          <div class="val" id="m-eta-mean">—</div>
+        </div>
+        <div>
+          <div style="font-size:10px;letter-spacing:.24em;color:var(--ink-dim);text-transform:uppercase;margin-bottom:4px">MEDIAN (50%)</div>
+          <div class="val" id="m-eta-median" style="font-size:22px;color:var(--cyan);text-shadow:var(--shadow-cyan)">—</div>
+        </div>
+        <div style="flex:1;min-width:180px">
+          <div style="font-size:10px;letter-spacing:.24em;color:var(--ink-dim);text-transform:uppercase;margin-bottom:4px">NETWORK</div>
+          <div style="font-size:18px;color:#fff" id="m-net-hashrate">— H/s</div>
+          <div class="sub">your share <b id="m-share" style="color:var(--cyan)">—</b> · block time 8 s</div>
+        </div>
+      </div>
+      <div id="prob-grid" style="margin-top:16px;display:grid;grid-template-columns:repeat(6,1fr);gap:8px">
+        <div style="padding:8px 10px;border:1px solid rgba(0,240,255,.18);background:rgba(0,240,255,.04)">
+          <div style="font-size:10px;letter-spacing:.2em;color:var(--ink-dim)">P(1 H)</div>
+          <div id="m-p1" style="font-size:18px;color:var(--lime);font-weight:600">—</div>
+        </div>
+        <div style="padding:8px 10px;border:1px solid rgba(0,240,255,.18);background:rgba(0,240,255,.04)">
+          <div style="font-size:10px;letter-spacing:.2em;color:var(--ink-dim)">P(2 H)</div>
+          <div id="m-p2" style="font-size:18px;color:var(--lime);font-weight:600">—</div>
+        </div>
+        <div style="padding:8px 10px;border:1px solid var(--magenta);background:rgba(255,43,214,.10);box-shadow:var(--shadow-mag)">
+          <div style="font-size:10px;letter-spacing:.2em;color:var(--magenta)">P(3 H · FREE WINDOW)</div>
+          <div id="m-p3" style="font-size:18px;color:var(--magenta);font-weight:700;text-shadow:var(--shadow-mag)">—</div>
+        </div>
+        <div style="padding:8px 10px;border:1px solid rgba(0,240,255,.18);background:rgba(0,240,255,.04)">
+          <div style="font-size:10px;letter-spacing:.2em;color:var(--ink-dim)">P(6 H)</div>
+          <div id="m-p6" style="font-size:18px;color:var(--lime);font-weight:600">—</div>
+        </div>
+        <div style="padding:8px 10px;border:1px solid rgba(0,240,255,.18);background:rgba(0,240,255,.04)">
+          <div style="font-size:10px;letter-spacing:.2em;color:var(--ink-dim)">P(12 H)</div>
+          <div id="m-p12" style="font-size:18px;color:var(--lime);font-weight:600">—</div>
+        </div>
+        <div style="padding:8px 10px;border:1px solid rgba(0,240,255,.18);background:rgba(0,240,255,.04)">
+          <div style="font-size:10px;letter-spacing:.2em;color:var(--ink-dim)">P(24 H)</div>
+          <div id="m-p24" style="font-size:18px;color:var(--lime);font-weight:600">—</div>
+        </div>
+      </div>
+      <div class="ticker"><span class="blip"></span> POISSON · P(≥1 block in T) = 1 − e^(−T / mean) · variance σ = mean</div>
     </div>
 
     <!-- Identity / coinbase block -->
@@ -271,6 +317,33 @@
 
   const fmt = n => (n ?? 0).toLocaleString('en-US');
   const trunc = (s, n=42) => !s ? '—' : (s.length > n ? s.slice(0, n) + '…' : s);
+
+  function fmtDuration(sec){
+    if (sec == null || !isFinite(sec) || sec <= 0) return '—';
+    if (sec < 60)        return sec.toFixed(0) + ' s';
+    if (sec < 3600)      return Math.floor(sec/60) + 'm ' + Math.floor(sec%60) + 's';
+    if (sec < 86400)     return Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm';
+    const d = Math.floor(sec/86400), h = Math.floor((sec%86400)/3600);
+    return d + 'd ' + h + 'h';
+  }
+  function fmtPct(p){
+    if (p == null || !isFinite(p)) return '—';
+    if (p >= 0.999) return '>99.9%';
+    if (p >= 0.10)  return (p * 100).toFixed(1) + '%';
+    if (p >= 0.001) return (p * 100).toFixed(2) + '%';
+    return (p * 100).toExponential(1) + '%';
+  }
+  function fmtShare(pct){
+    if (pct == null || !isFinite(pct) || pct <= 0) return '—';
+    if (pct >= 1)     return pct.toFixed(2) + '%';
+    if (pct >= 0.01)  return pct.toFixed(3) + '%';
+    return pct.toExponential(2) + '%';
+  }
+  // P(at least one block in T seconds) = 1 - exp(-T / meanSec)
+  function probWithin(seconds, meanSec){
+    if (meanSec == null || !isFinite(meanSec) || meanSec <= 0) return null;
+    return 1 - Math.exp(-seconds / meanSec);
+  }
 
   function setStatus(ok, txt){
     const pill = $('m-status');
@@ -393,6 +466,25 @@
     $('m-miners-inline').textContent = data.miners?.count ?? ml.length ?? 0;
     $('m-miners-sub').textContent = ml.length ? 'Active stratum sessions' : 'Awaiting handshake…';
     renderMiners(ml);
+
+    // Solo block ETA
+    const meanSec = data.solo?.expectedBlockSec ?? null;
+    const medSec  = data.solo?.medianBlockSec   ?? null;
+    $('m-eta-mean').textContent     = fmtDuration(meanSec);
+    $('m-eta-median').textContent   = fmtDuration(medSec);
+    $('m-net-hashrate').textContent = data.network?.hashrate ?? '— H/s';
+    $('m-share').textContent        = fmtShare(data.solo?.sharePct);
+    const windows = [
+      ['m-p1',  3600],
+      ['m-p2',  7200],
+      ['m-p3',  10800],
+      ['m-p6',  21600],
+      ['m-p12', 43200],
+      ['m-p24', 86400],
+    ];
+    for (const [id, sec] of windows){
+      $(id).textContent = fmtPct(probWithin(sec, meanSec));
+    }
 
     // Coinbase
     $('m-coinbase').textContent = data.coinbase ?? '—';

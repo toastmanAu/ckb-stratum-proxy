@@ -79,15 +79,32 @@ function log(tag, ...args) {
 // ── Target helpers ────────────────────────────────────────────────────────────
 const MASK256 = (1n << 256n) - 1n;
 
-function compactToTargetLE(compact) {
+function compactToTargetBigInt(compact) {
   const c   = BigInt(compact);
   const exp = c >> 24n;
   const man = c & 0xffffffn;
   let n = (exp <= 3n) ? (man >> (8n * (3n - exp))) : (man << (8n * (exp - 3n)));
   if (n > MASK256) n = MASK256;
+  return n;
+}
+
+function compactToTargetLE(compact) {
+  const n = compactToTargetBigInt(compact);
   let be = n.toString(16).padStart(64, '0');
   let le = ''; for (let i = 62; i >= 0; i -= 2) le += be.slice(i, i+2);
   return le;
+}
+
+// Network hashrate (H/s) at the given compact_target.
+// difficulty = (2^256 - 1) / target  ≈  hashes per block at this target
+// network_hashrate = difficulty / CKB_BLOCK_TIME_SEC (8s)
+const CKB_BLOCK_TIME_SEC = 8;
+function networkHashrateFromCompact(compactHex) {
+  if (!compactHex) return 0;
+  const target = compactToTargetBigInt(parseInt(compactHex, 16));
+  if (target === 0n) return 0;
+  const difficulty = MASK256 / target;
+  return Number(difficulty) / CKB_BLOCK_TIME_SEC;
 }
 
 /** Scale a pool-difficulty target to a local difficulty */
@@ -697,6 +714,8 @@ const statsServer = http.createServer((req, res) => {
     // Hashrate estimate: sps × diff × 2^32
   // Standard CKB stratum formula — diff=1 baseline is 2^32 hashes/share
   function fmtHashrate(hps) {
+    if (hps >= 1e18) return (hps / 1e18).toFixed(2) + ' EH/s';
+    if (hps >= 1e15) return (hps / 1e15).toFixed(2) + ' PH/s';
     if (hps >= 1e12) return (hps / 1e12).toFixed(2) + ' TH/s';
     if (hps >= 1e9)  return (hps / 1e9).toFixed(2)  + ' GH/s';
     if (hps >= 1e6)  return (hps / 1e6).toFixed(2)  + ' MH/s';
@@ -725,6 +744,13 @@ const statsServer = http.createServer((req, res) => {
   // Total hashrate across all miners
   const totalHps = minerList.reduce((s, m) => s + m.hashrateHps, 0);
 
+  // Network hashrate + solo block-find ETA (mean) from current template's target
+  const networkHps = currentTemplate
+    ? networkHashrateFromCompact(currentTemplate.compact_target)
+    : 0;
+  const localShare       = (networkHps > 0 && totalHps > 0) ? (totalHps / networkHps) : 0;
+  const expectedBlockSec = localShare > 0 ? (CKB_BLOCK_TIME_SEC / localShare) : null;
+
   const data = {
     node    : `${NODE_HOST}:${NODE_PORT}`,
     nodeHealthy,
@@ -741,6 +767,16 @@ const statsServer = http.createServer((req, res) => {
     totals,
     hashrate: fmtHashrate(totalHps),
     hashrateHps: totalHps,
+    network : {
+      hashrate   : fmtHashrate(networkHps),
+      hashrateHps: networkHps,
+      blockTimeSec: CKB_BLOCK_TIME_SEC,
+    },
+    solo    : {
+      sharePct        : localShare > 0 ? localShare * 100 : 0,
+      expectedBlockSec,                                   // mean time to find one block
+      medianBlockSec  : expectedBlockSec != null ? expectedBlockSec * Math.LN2 : null,
+    },
     miners  : {
       count: miners.size,
       list : minerList,
