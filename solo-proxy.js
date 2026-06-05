@@ -45,6 +45,10 @@ const VARDIFF = {
   minDiff        : config.vardiff?.minDiff          || 0.001,
   maxDiff        : config.vardiff?.maxDiff          || 1e9,
   initialDiff    : config.vardiff?.initialDiff      ?? 1.0,
+  // K7 / GodMiner don't send mining.suggest_difficulty, so we seed a sensible
+  // starting diff from the user-agent. 65536 targets ~6s/share at 67 TH/s —
+  // vardiff converges up to the true ~470k target in ~2 retargets.
+  godminerInitialDiff: config.vardiff?.godminerInitialDiff ?? 65536,
 };
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -465,7 +469,17 @@ function handleMinerMessage(miner, line) {
         // Simple 3-tuple subscribe response (no nested subscription list).
         miner._extranonce1 = '0011223344556677';
         sendToMiner(miner, { id: msg.id, result: [null, miner._extranonce1, 8], error: null });
+
+        // GodMiner firmware doesn't send mining.suggest_difficulty, so seed a
+        // sensible starting diff here based on the UA. Clamp against vardiff bounds.
+        const seedDiff = Math.min(Math.max(VARDIFF.godminerInitialDiff, VARDIFF.minDiff), VARDIFF.maxDiff);
+        const before   = miner.vardiff.currentDiff;
+        miner.vardiff.currentDiff    = seedDiff;
+        miner.vardiff.windowStart    = Date.now();
+        miner.vardiff.sharesInWindow = 0;
+        miner.vardiff.lastRetarget   = Date.now();
         log('MINE', `#${miner.id} subscribed (ua=${ua}, K7-mode)`);
+        log('VDIF', `#${miner.id} K7 seed diff: ${before} → ${seedDiff}`);
 
         // K7 expects set_target + notify pushed at subscribe time AS WELL AS after auth.
         if (currentTargetLE) sendVardiff(miner);
