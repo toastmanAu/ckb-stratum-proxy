@@ -4,7 +4,9 @@
   "description": "Local Stratum proxy for CKB (Eaglesong) mining — connect any miner to your local network",
   "main": "proxy.js",
   "scripts": {
-    "start": "node proxy.js"
+    "start": "node proxy.js",
+    "solo": "node solo-proxy.js",
+    "test": "node --test test/*.test.js"
   },
   "license": "MIT",
   "dependencies": {
