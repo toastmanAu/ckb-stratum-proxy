@@ -13,6 +13,8 @@ const http = require('http');
 const { ckbBlake2b }  = require('./blake2b.js');
 const { eaglesong }   = require('./eaglesong.js');
 const { computePowHash, serializeFullHeader, parseEpoch } = require('./ckb-header.js');
+const merkle = require('./ckb-merkle.js');
+const { createJobRegistry, evaluateShare } = require('./job-registry.js');
 const fs   = require('fs');
 const path = require('path');
 
@@ -60,6 +62,10 @@ let pollTimer        = null;
 
 let minerIdCounter = 0;
 const miners = new Map();
+
+// Snapshot of every recent job by id, so a share is validated/submitted against
+// the exact job the miner solved (not whatever job is current now).
+const jobs = createJobRegistry();
 
 const totals = {
   blocksFound    : 0,
@@ -193,9 +199,9 @@ async function fetchTemplate() {
     if (currentTemplate &&
         tpl.work_id === currentTemplate.work_id &&
         tpl.parent_hash === currentTemplate.parent_hash) {
-      // Same template — but update timestamp field so miners get fresh nonce space
-      // (avoids nonce collisions if same job runs for many seconds)
-      currentTemplate.current_time = tpl.current_time;
+      // Same job — do NOT mutate current_time; it is committed in the RawHeader
+      // that pow_hash derives from, so changing it here would desync the miner's
+      // solved nonce from the header we submit. Miners have 2^128 nonce space.
       lastTemplateTime = Date.now();
       return;
     }
@@ -215,6 +221,10 @@ async function fetchTemplate() {
     const fields = templateToHeaderFields(tpl);
     currentPowHash  = computePowHash(fields);
     currentTargetLE = compactToTargetLE(parseInt(tpl.compact_target, 16));
+
+    // Snapshot this job so a share solved against it stays valid after the job
+    // rolls over (stale-job block recovery).
+    jobs.add({ jobId: currentJobId, powHash: currentPowHash, targetLE: currentTargetLE, template: tpl });
 
     const epoch  = parseEpoch(tpl.epoch);
     const height = parseInt(tpl.number, 16);
@@ -298,18 +308,9 @@ function scheduleWsReconnect() {
 }
 
 function templateToHeaderFields(tpl) {
-  return {
-    version        : tpl.version,
-    compact_target : tpl.compact_target,
-    timestamp      : tpl.current_time,
-    number         : tpl.number,
-    epoch          : tpl.epoch,
-    parent_hash    : tpl.parent_hash,
-    transactions_root: tpl.transactions_root || ('0x' + '0'.repeat(64)),
-    proposals_hash : tpl.proposals_hash     || ('0x' + '0'.repeat(64)),
-    extra_hash     : tpl.uncles_hash        || ('0x' + '0'.repeat(64)),
-    dao            : tpl.dao,
-  };
+  // get_block_template does NOT return transactions_root/proposals_hash/extra_hash;
+  // the miner must compute them (CBMT over cellbase+txs, proposals, uncles+extension).
+  return merkle.templateToHeaderFields(tpl);
 }
 
 function startPolling() {
@@ -381,38 +382,17 @@ function broadcastJob(clean) {
 }
 
 // ── Block submission ──────────────────────────────────────────────────────────
-async function submitBlock(nonce) {
-  const tpl    = currentTemplate;
-  const fields = templateToHeaderFields(tpl);
+async function submitBlock(nonce, tpl = currentTemplate) {
+  const nonceHex = '0x' + nonce.replace(/^0x/, '').padStart(32, '0');
 
-  // Build full block as molecule (hex) for submit_block
-  // CKB submit_block expects: { work_id, block }
-  // block = { header, uncles, transactions, proposals }
-  // For simplicity we build only the header bytes and use the template data
-
-  // Construct the block object matching what get_block_template returned
-  const block = {
-    header: {
-      version        : fields.version,
-      compact_target : fields.compact_target,
-      timestamp      : fields.timestamp,
-      number         : fields.number,
-      epoch          : fields.epoch,
-      parent_hash    : fields.parent_hash,
-      transactions_root: fields.transactions_root,
-      proposals_hash : fields.proposals_hash,
-      extra_hash     : fields.extra_hash,
-      dao            : fields.dao,
-      nonce          : '0x' + nonce.replace(/^0x/, '').padStart(32, '0'),
-    },
-    uncles      : tpl.uncles       || [],
-    transactions: tpl.transactions || [],
-    proposals   : tpl.proposals    || [],
-  };
+  // buildBlockForSubmit computes the three header commitments, includes the
+  // cellbase as transactions[0], reconstructs uncle blocks, and carries the
+  // extension so the node recomputes extra_hash identically.
+  const block = merkle.buildBlockForSubmit(tpl, nonceHex);
 
   try {
     const result = await rpc('submit_block', [tpl.work_id, block]);
-    log('BLOCK', `✓ BLOCK FOUND! height=${parseInt(tpl.number,16)} nonce=${nonce} result=${result}`);
+    log('BLOCK', `✓ BLOCK FOUND! height=${parseInt(tpl.number,16)} nonce=${nonceHex} result=${result}`);
     totals.blocksFound++;
     return true;
   } catch (e) {
@@ -545,23 +525,8 @@ function handleMinerMessage(miner, line) {
       const jobId = msg.params[1];
       const nonce = msg.params[msg.params.length - 1];
       const jobIdInt = parseInt(jobId, 16);
-
-      // If share is for an old job: ACK it (so miner stops replaying buffer)
-      // but don't actually validate/submit — the work is stale
-      if (jobIdInt !== currentJobId) {
-        const work = miner.vardiff.currentDiff * 4294967296;
-        totals.sharesSubmitted++;
-        totals.sharesAccepted++;
-        totals.totalShareWork += work;
-        miner.sharesSubmitted++;
-        miner.sharesAccepted++;
-        miner.totalShareWork += work;
-        sendToMiner(miner, { id: msg.id, result: true, error: null });
-        return;
-      }
-
-      if (!nonce || !currentPowHash) {
-        sendToMiner(miner, { id: msg.id, result: false, error: [20, 'No current job', null] });
+      if (!nonce) {
+        sendToMiner(miner, { id: msg.id, result: false, error: [20, 'No nonce', null] });
         return;
       }
 
@@ -571,12 +536,32 @@ function handleMinerMessage(miner, line) {
       const noncePadded = miner._isGodMiner
         ? (miner._extranonce1 || '0011223344556677') + n8
         : n8.padStart(32, '0');
-      const input       = Buffer.concat([Buffer.from(currentPowHash, 'hex'), Buffer.from(noncePadded, 'hex')]);
-      const hash        = eaglesong(input);
 
-      // Check local (vardiff) target
-      const localTarget = diffToTargetLE(miner.vardiff.currentDiff);
-      if (localTarget && !meetsTargetLE(hash, localTarget)) {
+      // Validate against the EXACT job the miner solved (its snapshot), not the
+      // current globals — a block solved just after the job rolled must be
+      // recovered, not silently dropped.
+      const job   = jobs.get(jobIdInt);
+      const stale = jobIdInt !== currentJobId;
+      const v     = evaluateShare(job, noncePadded, miner.vardiff.currentDiff);
+      const work  = miner.vardiff.currentDiff * 4294967296;
+
+      const maybeSubmitBlock = () => {
+        if (!v.isBlock) return;
+        log('MINE', `🎉 BLOCK SOLUTION on job #${jobIdInt.toString(16)}${stale ? ' (STALE — recovered)' : ''}! Submitting…`);
+        submitBlock(v.noncePadded, job.template).then(ok => {
+          if (ok) broadcastJob(true);  // force clean job refresh after find
+        });
+      };
+
+      if (v.status === 'unknown_job') {
+        // Snapshot evicted or job never issued — ACK so the miner stops replaying.
+        totals.sharesAccepted++; totals.totalShareWork += work;
+        miner.sharesAccepted++;  miner.totalShareWork += work;
+        sendToMiner(miner, { id: msg.id, result: true, error: null });
+        return;
+      }
+
+      if (v.status === 'low_diff' && !stale) {
         totals.sharesRejected++;
         miner.sharesRejected++;
         log('MINE', `#${miner.id} share below local diff`);
@@ -584,21 +569,12 @@ function handleMinerMessage(miner, line) {
         return;
       }
 
-      const work = miner.vardiff.currentDiff * 4294967296;
-      totals.sharesAccepted++;
-      totals.totalShareWork += work;
-      miner.sharesAccepted++;
-      miner.totalShareWork += work;
-      log('MINE', `#${miner.id} share accepted (${miner.worker})`);
+      totals.sharesAccepted++; totals.totalShareWork += work;
+      miner.sharesAccepted++;  miner.totalShareWork += work;
+      log('MINE', `#${miner.id} share accepted (${miner.worker})${stale ? ' [stale job]' : ''}`);
       sendToMiner(miner, { id: msg.id, result: true, error: null });
 
-      // Check if it meets the actual network target
-      if (meetsTargetLE(hash, currentTargetLE)) {
-        log('MINE', '🎉 🎉 🎉  BLOCK SOLUTION! Submitting to node...');
-        submitBlock(noncePadded).then(ok => {
-          if (ok) broadcastJob(true);  // force clean job refresh after find
-        });
-      }
+      maybeSubmitBlock();
       break;
     }
 
