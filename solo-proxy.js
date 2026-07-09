@@ -14,7 +14,7 @@ const { ckbBlake2b }  = require('./blake2b.js');
 const { eaglesong }   = require('./eaglesong.js');
 const { computePowHash, serializeFullHeader, parseEpoch } = require('./ckb-header.js');
 const merkle = require('./ckb-merkle.js');
-const { createJobRegistry, evaluateShare } = require('./job-registry.js');
+const { createJobRegistry, evaluateShare, shareDecision } = require('./job-registry.js');
 const fs   = require('fs');
 const path = require('path');
 
@@ -561,7 +561,11 @@ function handleMinerMessage(miner, line) {
         return;
       }
 
-      if (v.status === 'low_diff' && !stale) {
+      // A network-target solution is NEVER rejected or dropped, even if the
+      // share fails the miner's local vardiff target (shareDecision invariant).
+      const decision = shareDecision(v, stale);
+
+      if (decision.reject) {
         totals.sharesRejected++;
         miner.sharesRejected++;
         log('MINE', `#${miner.id} share below local diff`);
@@ -574,7 +578,7 @@ function handleMinerMessage(miner, line) {
       log('MINE', `#${miner.id} share accepted (${miner.worker})${stale ? ' [stale job]' : ''}`);
       sendToMiner(miner, { id: msg.id, result: true, error: null });
 
-      maybeSubmitBlock();
+      if (decision.submitBlock) maybeSubmitBlock();
       break;
     }
 

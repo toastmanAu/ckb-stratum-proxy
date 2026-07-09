@@ -8,7 +8,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert');
-const { createJobRegistry, evaluateShare } = require('../job-registry.js');
+const { createJobRegistry, evaluateShare, shareDecision } = require('../job-registry.js');
 
 const POW = 'a'.repeat(64);          // any 32-byte pow_hash hex
 const MAX_TARGET = 'ff'.repeat(32);  // easiest possible target — any hash is a "block"
@@ -69,6 +69,47 @@ test('a share below the miner local difficulty is low_diff', () => {
 test('evaluateShare pads the nonce to 16 bytes (32 hex) consistently', () => {
   const v = evaluateShare(snap(1, MAX_TARGET), '0xabc', 0.0001);
   assert.strictEqual(v.noncePadded, 'abc'.padStart(32, '0'));
+});
+
+// ── shareDecision: a block-level share must NEVER be dropped ────────────────
+test('a network-target block below local diff is still submitted (not dropped)', () => {
+  const d = shareDecision({ status: 'low_diff', isBlock: true }, false);
+  assert.strictEqual(d.submitBlock, true, 'block must be submitted');
+  assert.strictEqual(d.reject, false, 'block-bearing share must not be rejected');
+});
+
+test('an ordinary low_diff share on the current job is rejected, no block', () => {
+  const d = shareDecision({ status: 'low_diff', isBlock: false }, false);
+  assert.strictEqual(d.submitBlock, false);
+  assert.strictEqual(d.reject, true);
+});
+
+test('a stale low_diff share is ACKed, not rejected (job-boundary leniency)', () => {
+  const d = shareDecision({ status: 'low_diff', isBlock: false }, true);
+  assert.strictEqual(d.reject, false);
+});
+
+test('an accepted block share is both accepted and submitted', () => {
+  const d = shareDecision({ status: 'accepted', isBlock: true }, false);
+  assert.strictEqual(d.submitBlock, true);
+  assert.strictEqual(d.reject, false);
+});
+
+test('unknown_job shares are ACKed with nothing to submit', () => {
+  const d = shareDecision({ status: 'unknown_job', isBlock: false }, true);
+  assert.strictEqual(d.submitBlock, false);
+  assert.strictEqual(d.reject, false);
+});
+
+test('end-to-end: vardiff above network diff cannot drop a real block', () => {
+  // huge minerDiff → local target harder than the (easy) network target:
+  // the share fails local diff but IS a block — the exact drop scenario.
+  const v = evaluateShare(snap(1, MAX_TARGET), '0x1234', 1e12);
+  assert.strictEqual(v.status, 'low_diff');
+  assert.strictEqual(v.isBlock, true);
+  const d = shareDecision(v, false);
+  assert.strictEqual(d.submitBlock, true, 'block recovered despite low_diff');
+  assert.strictEqual(d.reject, false);
 });
 
 // ── the actual fix: a stale-but-solved job is still recoverable ─────────────

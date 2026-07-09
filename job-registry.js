@@ -65,4 +65,19 @@ function evaluateShare(job, nonceHex, minerDiff) {
   return { status: meetsLocal ? 'accepted' : 'low_diff', isBlock, noncePadded };
 }
 
-module.exports = { createJobRegistry, evaluateShare, DEFAULT_MAX_JOBS };
+/**
+ * Decide the stratum response and block action for an evaluated share.
+ * Invariant: a network-target solution (isBlock) is NEVER rejected or dropped,
+ * even when it fails the miner's local vardiff target — possible only when
+ * vardiff exceeds network difficulty, but a block is a block.
+ * @param {{status:string, isBlock:boolean}} v  result of evaluateShare
+ * @param {boolean} stale  share names a job older than the current one
+ * @returns {{submitBlock:boolean, reject:boolean}}
+ */
+function shareDecision(v, stale) {
+  const submitBlock = v.isBlock === true;
+  const reject = v.status === 'low_diff' && !stale && !submitBlock;
+  return { submitBlock, reject };
+}
+
+module.exports = { createJobRegistry, evaluateShare, shareDecision, DEFAULT_MAX_JOBS };
